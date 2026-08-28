@@ -78,6 +78,7 @@ let state = {
   selectedHistory: {},
   loggingInspectionFor: null,
   inspectionHistoryFor: null,
+  reorderPopupDismissedIds: [],
   err: "",
 };
 
@@ -455,6 +456,23 @@ function historyRowHtml(wo, asset) {
     </td>
     <td style="padding:8px 10px;"><button class="btn" onclick="window.__openJobCard('${wo.id}')">Job card</button></td>
   </tr>`;
+}
+
+function reorderPopupHtml(parts) {
+  return `
+  <div style="position:fixed; inset:0; background:rgba(27,34,43,0.5); z-index:60; display:flex; align-items:center; justify-content:center; padding:24px;" class="no-print">
+    <div style="background:#fff; max-width:420px; width:100%; border-radius:8px; padding:24px;">
+      <div style="font-weight:700; font-size:18px; margin-bottom:4px; color:#7A241F;">Parts need reordering</div>
+      <div style="font-size:13px; color:#4C6478; margin-bottom:14px;">${parts.length} part${parts.length > 1 ? "s are" : " is"} at or below buffer stock.</div>
+      <div style="max-height:240px; overflow-y:auto; margin-bottom:16px;">
+        ${parts.map(p => `<div class="row" style="justify-content:space-between; padding:6px 0; border-bottom:1px solid #D8D5C9; font-size:13px;"><span>${esc(p.name)}</span><span style="color:#C1443C; font-weight:600;">${p.stock_on_hand}/${p.buffer_stock}</span></div>`).join("")}
+      </div>
+      <div class="row" style="gap:8px; justify-content:flex-end;">
+        <button class="btn" onclick="window.__dismissReorderPopup()">Dismiss</button>
+        <button class="btn btn-dark" onclick="window.__goToPartsFromPopup()">View parts</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function jobCardHtml(wo, asset, parts) {
@@ -1100,7 +1118,11 @@ function renderApp() {
       ${s.err ? `<div class="err">${esc(s.err)}</div>` : ""}
       ${main}
     </div>
-  </div>`;
+  </div>
+  ${(() => {
+    const undismissed = reorderParts.filter(p => !s.reorderPopupDismissedIds.includes(p.id));
+    return undismissed.length > 0 ? reorderPopupHtml(undismissed) : "";
+  })()}`;
 }
 
 function render() {
@@ -1215,6 +1237,15 @@ window.__toggleHistorySelectAll = (checked) => {
 };
 window.__openJobCard = (id) => { state.jobCardFor = id; render(); };
 window.__closeJobCard = () => { state.jobCardFor = null; render(); };
+window.__dismissReorderPopup = () => {
+  state.reorderPopupDismissedIds = state.parts.filter(p => p.stock_on_hand <= p.buffer_stock).map(p => p.id);
+  render();
+};
+window.__goToPartsFromPopup = () => {
+  state.reorderPopupDismissedIds = state.parts.filter(p => p.stock_on_hand <= p.buffer_stock).map(p => p.id);
+  state.tab = "parts";
+  render();
+};
 window.__uploadPhoto = (orderId) => {
   const input = document.getElementById(`ph-file-${orderId}`);
   const file = input.files[0];
