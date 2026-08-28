@@ -14,7 +14,7 @@
   .btn-active { background: #1B222B; color: #EEEDE6; border-color: #1B222B; }
   .card { background: #FFFFFF; border: 1px solid #D8D5C9; border-radius: 6px; padding: 16px; }
   .part-photo { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid #D8D5C9; cursor: pointer; transition: transform 0.15s ease; transform-origin: top left; flex-shrink: 0; }
-  .part-photo:hover { transform: scale(3.2); z-index: 30; position: relative; box-shadow: 0 6px 20px rgba(27,34,43,0.35); }
+  .part-photo:hover { transform: scale(6.4); z-index: 30; position: relative; box-shadow: 0 6px 20px rgba(27,34,43,0.35); }
   .label { font-size: 11px; font-weight: 600; color: #4C6478; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; display: block; }
   .tag { display: inline-flex; align-items: center; gap: 6px; font-family: monospace; font-size: 11px; font-weight: 600; text-transform: uppercase; border-radius: 3px; padding: 3px 8px; }
   .row { display: flex; }
@@ -276,18 +276,22 @@ async function uploadPartPhoto(partId, file) {
   render();
 }
 
-async function addPart(name, category, unit, stock, buffer) {
+async function addPart(name, category, unit, stock, buffer, supplierName, supplierContact, supplierSku) {
   state.err = "";
   const { error } = await supabase.from("parts").insert({
     id: uid("PT"), name, category, unit, stock_on_hand: stock, buffer_stock: buffer,
+    supplier_name: supplierName, supplier_contact: supplierContact, supplier_sku: supplierSku,
   });
   if (error) { state.err = error.message; render(); return; }
   state.showAddPart = false;
   await loadData();
   render();
 }
-async function savePart(id, stock, buffer) {
-  const { error } = await supabase.from("parts").update({ stock_on_hand: stock, buffer_stock: buffer }).eq("id", id);
+async function savePart(id, stock, buffer, supplierName, supplierContact, supplierSku) {
+  const { error } = await supabase.from("parts").update({
+    stock_on_hand: stock, buffer_stock: buffer,
+    supplier_name: supplierName, supplier_contact: supplierContact, supplier_sku: supplierSku,
+  }).eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadData();
   render();
@@ -731,6 +735,12 @@ function partHtml(p) {
         <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
       </div>
     </div>
+    <div style="margin-top:8px;">
+      <label class="label">Supplier</label>
+      <input id="pt-supname-${esc(p.id)}" value="${esc(p.supplier_name || "")}" placeholder="Supplier name" style="margin-bottom:6px;" />
+      <input id="pt-supcontact-${esc(p.id)}" value="${esc(p.supplier_contact || "")}" placeholder="Phone or email" style="margin-bottom:6px;" />
+      <input id="pt-supsku-${esc(p.id)}" value="${esc(p.supplier_sku || "")}" placeholder="Supplier part / SKU number" />
+    </div>
     <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
       ${needsReorder ? tagHtml("Reorder needed", "#C1443C", "#7A241F") : tagHtml("Stock OK", "#3F8354", "#204F30")}
       <div class="row" style="gap:6px;">
@@ -768,6 +778,20 @@ function addPartFormHtml() {
       </div>
     </div>
     <div style="font-size:11px; color:#8A9AA8; margin-bottom:14px;">When stock on hand drops to or below the buffer level, this part is flagged as needing reorder.</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;">
+      <div>
+        <label class="label">Supplier name</label>
+        <input id="ap-supname" placeholder="e.g. Acme Parts Co" />
+      </div>
+      <div>
+        <label class="label">Supplier contact</label>
+        <input id="ap-supcontact" placeholder="Phone or email" />
+      </div>
+      <div style="grid-column:1 / -1;">
+        <label class="label">Supplier part / SKU number</label>
+        <input id="ap-supsku" placeholder="Optional" />
+      </div>
+    </div>
     <div class="row" style="gap:8px;">
       <button class="btn btn-dark" onclick="window.__submitAddPart()">Add part</button>
       <button class="btn" onclick="window.__toggleAddPart(false)">Cancel</button>
@@ -968,13 +992,19 @@ window.__submitAddPart = () => {
   const unit = document.getElementById("ap-unit").value.trim() || "ea";
   const stock = parseInt(document.getElementById("ap-stock").value, 10) || 0;
   const buffer = parseInt(document.getElementById("ap-buffer").value, 10) || 0;
+  const supName = document.getElementById("ap-supname").value.trim();
+  const supContact = document.getElementById("ap-supcontact").value.trim();
+  const supSku = document.getElementById("ap-supsku").value.trim();
   if (!name) { state.err = "Enter a part name."; render(); return; }
-  addPart(name, category, unit, stock, buffer);
+  addPart(name, category, unit, stock, buffer, supName, supContact, supSku);
 };
 window.__savePart = (id) => {
   const stock = parseInt(document.getElementById(`pt-stock-${id}`).value, 10) || 0;
   const buffer = parseInt(document.getElementById(`pt-buffer-${id}`).value, 10) || 0;
-  savePart(id, stock, buffer);
+  const supName = document.getElementById(`pt-supname-${id}`).value.trim();
+  const supContact = document.getElementById(`pt-supcontact-${id}`).value.trim();
+  const supSku = document.getElementById(`pt-supsku-${id}`).value.trim();
+  savePart(id, stock, buffer, supName, supContact, supSku);
 };
 window.__uploadPartPhoto = (partId) => {
   const input = document.getElementById(`pp-file-${partId}`);
