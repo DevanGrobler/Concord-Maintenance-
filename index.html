@@ -276,21 +276,23 @@ async function uploadPartPhoto(partId, file) {
   render();
 }
 
-async function addPart(name, category, unit, stock, buffer, supplierName, supplierContact, supplierSku) {
+async function addPart(name, category, unit, stock, buffer, supplierName, supplierContact, supplierSku, assetId) {
   state.err = "";
   const { error } = await supabase.from("parts").insert({
     id: uid("PT"), name, category, unit, stock_on_hand: stock, buffer_stock: buffer,
     supplier_name: supplierName, supplier_contact: supplierContact, supplier_sku: supplierSku,
+    asset_id: assetId || null,
   });
   if (error) { state.err = error.message; render(); return; }
   state.showAddPart = false;
   await loadData();
   render();
 }
-async function savePart(id, stock, buffer, supplierName, supplierContact, supplierSku) {
+async function savePart(id, stock, buffer, supplierName, supplierContact, supplierSku, assetId) {
   const { error } = await supabase.from("parts").update({
     stock_on_hand: stock, buffer_stock: buffer,
     supplier_name: supplierName, supplier_contact: supplierContact, supplier_sku: supplierSku,
+    asset_id: assetId || null,
   }).eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadData();
@@ -548,7 +550,12 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
         <div style="flex:1; min-width:140px;">
           <label class="label">Part</label>
           <select id="lp-part-${wo.id}">
-            ${parts.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`).join("")}
+            ${(() => {
+              const assetParts = parts.filter(p => p.asset_id === wo.asset_id);
+              const otherParts = parts.filter(p => p.asset_id !== wo.asset_id);
+              const opt = p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`;
+              return `${assetParts.length > 0 ? `<optgroup label="For this asset">${assetParts.map(opt).join("")}</optgroup>` : ""}${otherParts.length > 0 ? `<optgroup label="Other parts">${otherParts.map(opt).join("")}</optgroup>` : ""}`;
+            })()}
           </select>
         </div>
         <div style="width:80px;">
@@ -708,8 +715,9 @@ function addMemberFormHtml() {
   </div>`;
 }
 
-function partHtml(p) {
+function partHtml(p, assets) {
   const needsReorder = p.stock_on_hand <= p.buffer_stock;
+  const linkedAsset = assets.find(a => a.id === p.asset_id);
   return `
   <div class="card" style="position:relative; overflow:visible;">
     <div class="row" style="gap:10px; align-items:flex-start;">
@@ -723,6 +731,7 @@ function partHtml(p) {
         <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(p.id)}</div>
         <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(p.name)}</div>
         <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(p.category || "")} &middot; unit: ${esc(p.unit)}</div>
+        ${linkedAsset ? `<div style="font-size:11px; color:#8C5E12; margin-top:2px;">For: ${esc(linkedAsset.name)}</div>` : ""}
       </div>
     </div>
     <div style="margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
@@ -734,6 +743,13 @@ function partHtml(p) {
         <label class="label">Buffer stock</label>
         <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
       </div>
+    </div>
+    <div style="margin-top:8px;">
+      <label class="label">Allocated to asset</label>
+      <select id="pt-asset-${esc(p.id)}">
+        <option value="">General stock (not asset-specific)</option>
+        ${assets.map(a => `<option value="${esc(a.id)}" ${p.asset_id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+      </select>
     </div>
     <div style="margin-top:8px;">
       <label class="label">Supplier</label>
@@ -751,7 +767,7 @@ function partHtml(p) {
   </div>`;
 }
 
-function addPartFormHtml() {
+function addPartFormHtml(assets) {
   return `
   <div class="card" style="margin-bottom:16px;">
     <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Add part</div>
@@ -778,6 +794,13 @@ function addPartFormHtml() {
       </div>
     </div>
     <div style="font-size:11px; color:#8A9AA8; margin-bottom:14px;">When stock on hand drops to or below the buffer level, this part is flagged as needing reorder.</div>
+    <div style="margin-bottom:14px;">
+      <label class="label">Allocated to asset</label>
+      <select id="ap-asset">
+        <option value="">General stock (not asset-specific)</option>
+        ${assets.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;">
       <div>
         <label class="label">Supplier name</label>
@@ -864,10 +887,10 @@ function renderApp() {
         <div style="font-weight:700; font-size:22px;">Parts</div>
         ${!s.showAddPart ? `<button class="btn btn-dark" onclick="window.__toggleAddPart(true)">+ Add part</button>` : ""}
       </div>
-      ${s.showAddPart ? addPartFormHtml() : ""}
+      ${s.showAddPart ? addPartFormHtml(s.assets) : ""}
       ${reorderParts.length > 0 ? `<div class="err" style="background:#E3A73B18; border-color:#E3A73B55; color:#8C5E12;">${reorderParts.length} part${reorderParts.length > 1 ? "s are" : " is"} at or below buffer stock and may need reordering.</div>` : ""}
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
-        ${s.parts.map(partHtml).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts added yet.</div>`}
+        ${s.parts.map(p => partHtml(p, s.assets)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts added yet.</div>`}
       </div>
     `;
   } else if (s.tab === "history") {
@@ -992,19 +1015,21 @@ window.__submitAddPart = () => {
   const unit = document.getElementById("ap-unit").value.trim() || "ea";
   const stock = parseInt(document.getElementById("ap-stock").value, 10) || 0;
   const buffer = parseInt(document.getElementById("ap-buffer").value, 10) || 0;
+  const assetId = document.getElementById("ap-asset").value;
   const supName = document.getElementById("ap-supname").value.trim();
   const supContact = document.getElementById("ap-supcontact").value.trim();
   const supSku = document.getElementById("ap-supsku").value.trim();
   if (!name) { state.err = "Enter a part name."; render(); return; }
-  addPart(name, category, unit, stock, buffer, supName, supContact, supSku);
+  addPart(name, category, unit, stock, buffer, supName, supContact, supSku, assetId);
 };
 window.__savePart = (id) => {
   const stock = parseInt(document.getElementById(`pt-stock-${id}`).value, 10) || 0;
   const buffer = parseInt(document.getElementById(`pt-buffer-${id}`).value, 10) || 0;
+  const assetId = document.getElementById(`pt-asset-${id}`).value;
   const supName = document.getElementById(`pt-supname-${id}`).value.trim();
   const supContact = document.getElementById(`pt-supcontact-${id}`).value.trim();
   const supSku = document.getElementById(`pt-supsku-${id}`).value.trim();
-  savePart(id, stock, buffer, supName, supContact, supSku);
+  savePart(id, stock, buffer, supName, supContact, supSku, assetId);
 };
 window.__uploadPartPhoto = (partId) => {
   const input = document.getElementById(`pp-file-${partId}`);
