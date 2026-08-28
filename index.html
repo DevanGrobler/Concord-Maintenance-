@@ -401,7 +401,7 @@ function historyRowHtml(wo, asset) {
   </tr>`;
 }
 
-function jobCardHtml(wo, asset) {
+function jobCardHtml(wo, asset, parts) {
   const st = STATUS[wo.status];
   const pr = PRIORITY[wo.priority];
   const partsUsed = wo.parts_used || [];
@@ -437,7 +437,17 @@ function jobCardHtml(wo, asset) {
         ${wo.notes ? `<div style="margin-top:16px;"><div class="label">Notes</div><div style="font-size:13px;">${esc(wo.notes)}</div></div>` : ""}
         <div style="margin-top:16px;">
           <div class="label">Parts used</div>
-          ${partsUsed.length > 0 ? `<div style="font-size:13px;">${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : `<div style="font-size:13px; color:#8A9AA8;">None</div>`}
+          ${partsUsed.length > 0 ? `
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            ${partsUsed.map(pu => {
+              const usedPart = parts.find(p => p.id === pu.part_id);
+              const photo = usedPart && usedPart.photo_url;
+              return `<div class="row" style="gap:8px; align-items:center;">
+                ${photo ? `<img src="${esc(photo)}" style="width:36px; height:36px; object-fit:cover; border-radius:6px; border:1px solid #D8D5C9;" />` : `<div style="width:36px; height:36px; border-radius:6px; background:#EEEDE6; border:1px solid #D8D5C9; flex-shrink:0;"></div>`}
+                <span style="font-size:13px;">${pu.quantity}× ${esc(pu.part_name)}</span>
+              </div>`;
+            }).join("")}
+          </div>` : `<div style="font-size:13px; color:#8A9AA8;">None</div>`}
         </div>
         ${photos.length > 0 ? `
         <div style="margin-top:16px;">
@@ -544,7 +554,17 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
       </div>
 
       <div class="label">Parts used</div>
-      ${partsUsed.length > 0 ? `<div style="font-size:13px; margin-bottom:8px;">${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : `<div style="font-size:12px; color:#8A9AA8; margin-bottom:8px;">None logged yet.</div>`}
+      ${partsUsed.length > 0 ? `
+      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+        ${partsUsed.map(pu => {
+          const usedPart = parts.find(p => p.id === pu.part_id);
+          const photo = usedPart && usedPart.photo_url;
+          return `<div class="row" style="gap:8px; align-items:center;">
+            ${photo ? `<img src="${esc(photo)}" class="part-photo" style="width:28px; height:28px;" />` : `<div style="width:28px; height:28px; border-radius:6px; background:#EEEDE6; border:1px solid #D8D5C9; flex-shrink:0;"></div>`}
+            <span style="font-size:13px;">${pu.quantity}× ${esc(pu.part_name)}</span>
+          </div>`;
+        }).join("")}
+      </div>` : `<div style="font-size:12px; color:#8A9AA8; margin-bottom:8px;">None logged yet.</div>`}
       ${isLogging ? `
       <div class="row" style="gap:8px; align-items:flex-end; margin-bottom:12px; padding:10px; background:#EEEDE6; border-radius:4px; flex-wrap:wrap;">
         <div style="flex:1; min-width:140px;">
@@ -921,7 +941,7 @@ function renderApp() {
           </tbody>
         </table>
       </div>
-      ${s.jobCardFor ? jobCardHtml(s.orders.find(o => o.id === s.jobCardFor), s.assets.find(a => a.id === (s.orders.find(o => o.id === s.jobCardFor) || {}).asset_id)) : ""}
+      ${s.jobCardFor ? jobCardHtml(s.orders.find(o => o.id === s.jobCardFor), s.assets.find(a => a.id === (s.orders.find(o => o.id === s.jobCardFor) || {}).asset_id), s.parts) : ""}
     `;
   } else if (s.tab === "inspections") {
     main = `
