@@ -63,6 +63,7 @@ let state = {
   showForm: false,
   showAddMember: false,
   showAddPart: false,
+  logPartFor: null,
   err: "",
 };
 
@@ -184,6 +185,24 @@ async function deleteOrder(id) {
   if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
 }
 
+async function logPartUsage(orderId, partId, qty) {
+  state.err = "";
+  const order = state.orders.find(o => o.id === orderId);
+  const part = state.parts.find(p => p.id === partId);
+  if (!order || !part || qty <= 0) return;
+
+  const nextPartsUsed = [...(order.parts_used || []), { part_id: part.id, part_name: part.name, quantity: qty }];
+  const { error: woErr } = await supabase.from("work_orders").update({ parts_used: nextPartsUsed }).eq("id", orderId);
+  if (woErr) { state.err = woErr.message; render(); return; }
+
+  const { error: partErr } = await supabase.from("parts").update({ stock_on_hand: part.stock_on_hand - qty }).eq("id", part.id);
+  if (partErr) { state.err = partErr.message; render(); return; }
+
+  state.logPartFor = null;
+  await loadData();
+  render();
+}
+
 async function addPart(name, category, unit, stock, buffer) {
   state.err = "";
   const { error } = await supabase.from("parts").insert({
@@ -254,10 +273,12 @@ function tagHtml(label, color, deep) {
   return `<span class="tag" style="color:${deep}; background:${color}26; border:1px solid ${color}66;">${esc(label)}</span>`;
 }
 
-function ticketHtml(wo, asset) {
+function ticketHtml(wo, asset, parts, logPartFor) {
   const st = STATUS[wo.status];
   const pr = PRIORITY[wo.priority];
   const overdue = wo.status !== "done" && daysUntil(wo.due_date) < 0;
+  const partsUsed = wo.parts_used || [];
+  const isLogging = logPartFor === wo.id;
   return `
   <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:hidden; margin-bottom:10px;">
     <div style="width:6px; background:${overdue ? "#C1443C" : st.color};"></div>
@@ -276,11 +297,28 @@ function ticketHtml(wo, asset) {
         </div>
       </div>
       ${wo.notes ? `<div style="font-size:13px; margin-top:8px; opacity:0.8;">${esc(wo.notes)}</div>` : ""}
+      ${partsUsed.length > 0 ? `<div style="font-size:12px; color:#4C6478; margin-top:8px;"><span class="label" style="display:inline; margin:0;">Parts used</span> &nbsp;${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : ""}
+      ${isLogging ? `
+      <div class="row" style="gap:8px; align-items:flex-end; margin-top:10px; padding:10px; background:#EEEDE6; border-radius:4px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:140px;">
+          <label class="label">Part</label>
+          <select id="lp-part-${wo.id}">
+            ${parts.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`).join("")}
+          </select>
+        </div>
+        <div style="width:80px;">
+          <label class="label">Qty</label>
+          <input type="number" min="1" value="1" id="lp-qty-${wo.id}" />
+        </div>
+        <button class="btn btn-dark" onclick="window.__confirmLogPart('${wo.id}')">Add</button>
+        <button class="btn" onclick="window.__toggleLogPart(null)">Cancel</button>
+      </div>` : ""}
       <div class="row" style="justify-content:space-between; align-items:center; margin-top:10px;">
         <div style="font-size:12px; color:${overdue ? "#C1443C" : "#8A9AA8"}; font-weight:${overdue ? 600 : 400};">
           ${wo.status === "done" ? "Closed" : overdue ? "Overdue" : `Due ${esc(wo.due_date || "")}`}
         </div>
         <div class="row" style="gap:6px;">
+          ${!isLogging && parts.length > 0 ? `<button class="btn" onclick="window.__toggleLogPart('${wo.id}')">+ Log part</button>` : ""}
           ${wo.status !== "done" ? `<button class="btn" onclick="window.__advance('${wo.id}')">${wo.status === "open" ? "Start work" : "Mark done"}</button>` : ""}
           <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__delete('${wo.id}')">Delete</button>
         </div>
@@ -474,7 +512,7 @@ function renderApp() {
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Parts to reorder</div><div style="font-size:30px; font-weight:700; color:${reorderParts.length ? "#C1443C" : "#1B222B"};">${reorderParts.length}</div></div>
       </div>
       <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Needs attention</div>
-      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
+      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
     `;
   } else if (s.tab === "work-orders") {
     main = `
@@ -487,7 +525,7 @@ function renderApp() {
         ${["all", "open", "in-progress", "done"].map(f => `<button class="btn ${s.filter === f ? "btn-active" : ""}" onclick="window.__setFilter('${f}')">${f === "all" ? "All" : STATUS[f].label}</button>`).join("")}
         <input id="wo-search" placeholder="Search" value="${esc(s.query)}" style="width:140px; margin-left:auto;" oninput="window.__setQuery(this.value)" />
       </div>
-      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
+      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
     `;
   } else if (s.tab === "assets") {
     main = `
@@ -599,6 +637,13 @@ window.__savePart = (id) => {
   savePart(id, stock, buffer);
 };
 window.__deletePart = (id) => deletePart(id);
+window.__toggleLogPart = (orderId) => { state.logPartFor = orderId; render(); };
+window.__confirmLogPart = (orderId) => {
+  const partId = document.getElementById(`lp-part-${orderId}`).value;
+  const qty = parseInt(document.getElementById(`lp-qty-${orderId}`).value, 10) || 0;
+  if (qty <= 0) return;
+  logPartUsage(orderId, partId, qty);
+};
 window.__advance = (id) => advanceOrder(id);
 window.__delete = (id) => deleteOrder(id);
 window.__createOrder = () => {
