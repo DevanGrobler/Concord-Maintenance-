@@ -65,6 +65,7 @@ let state = {
   assets: [],
   orders: [],
   parts: [],
+  inspections: [],
   tab: "dashboard",
   filter: "all",
   query: "",
@@ -75,6 +76,8 @@ let state = {
   expandedOrder: null,
   jobCardFor: null,
   selectedHistory: {},
+  loggingInspectionFor: null,
+  inspectionHistoryFor: null,
   err: "",
 };
 
@@ -100,17 +103,20 @@ async function loadTeam() {
 }
 
 async function loadData() {
-  const [a, o, p] = await Promise.all([
+  const [a, o, p, ins] = await Promise.all([
     supabase.from("assets").select("*").order("id"),
     supabase.from("work_orders").select("*").order("created_at", { ascending: false }),
     supabase.from("parts").select("*").order("name"),
+    supabase.from("inspections").select("*").order("inspected_at", { ascending: false }),
   ]);
   if (a.error) state.err = a.error.message;
   if (o.error) state.err = o.error.message;
   if (p.error) state.err = p.error.message;
+  if (ins.error) state.err = ins.error.message;
   state.assets = a.data || [];
   state.orders = o.data || [];
   state.parts = p.data || [];
+  state.inspections = ins.data || [];
 }
 
 async function init() {
@@ -136,6 +142,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "assets" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "work_orders" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "parts" }, async () => { await loadData(); render(); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "inspections" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, async () => { await loadTeam(); render(); })
     .subscribe();
 }
@@ -311,10 +318,59 @@ async function saveInspectionInterval(assetId, days) {
   await loadData();
   render();
 }
-async function markInspected(assetId) {
-  const today = new Date().toISOString().slice(0, 10);
-  const { error } = await supabase.from("assets").update({ last_inspected: today }).eq("id", assetId);
-  if (error) { state.err = error.message; render(); return; }
+
+async function uploadAssetPhoto(assetId, file) {
+  state.err = "";
+  if (!file) return;
+  const path = `${assetId}/${Date.now()}-${file.name}`;
+  const { error: upErr } = await supabase.storage.from("asset-photos").upload(path, file);
+  if (upErr) { state.err = upErr.message; render(); return; }
+  const { data: pub } = supabase.storage.from("asset-photos").getPublicUrl(path);
+  const { error: assetErr } = await supabase.from("assets").update({ photo_url: pub.publicUrl }).eq("id", assetId);
+  if (assetErr) { state.err = assetErr.message; render(); return; }
+  await loadData();
+  render();
+}
+
+async function submitInspection(assetId, result, notes, files) {
+  state.err = "";
+  const photos = [];
+  for (const file of files) {
+    const path = `${assetId}/${Date.now()}-${file.name}`;
+    const { error: upErr } = await supabase.storage.from("inspection-photos").upload(path, file);
+    if (upErr) { state.err = upErr.message; render(); return; }
+    const { data: pub } = supabase.storage.from("inspection-photos").getPublicUrl(path);
+    photos.push({ url: pub.publicUrl, path });
+  }
+
+  let workOrderId = null;
+  if (result === "fail") {
+    const asset = state.assets.find(a => a.id === assetId);
+    workOrderId = uid("WO");
+    const { error: woErr } = await supabase.from("work_orders").insert({
+      id: workOrderId,
+      title: `Failed inspection: ${asset ? asset.name : assetId}`,
+      asset_id: assetId,
+      priority: "high",
+      status: "open",
+      assigned_to: "Unassigned",
+      created_by: state.currentUser.username,
+      due_date: new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
+      notes: notes || "Auto-created from a failed inspection.",
+    });
+    if (woErr) { state.err = woErr.message; render(); return; }
+  }
+
+  const { error: insErr } = await supabase.from("inspections").insert({
+    id: uid("INS"), asset_id: assetId, inspected_by: state.currentUser.username,
+    result, notes, photos, work_order_id: workOrderId,
+  });
+  if (insErr) { state.err = insErr.message; render(); return; }
+
+  const { error: assetErr } = await supabase.from("assets").update({ last_inspected: new Date().toISOString().slice(0, 10) }).eq("id", assetId);
+  if (assetErr) { state.err = assetErr.message; render(); return; }
+
+  state.loggingInspectionFor = null;
   await loadData();
   render();
 }
@@ -466,13 +522,23 @@ function jobCardHtml(wo, asset, parts) {
   </div>`;
 }
 
-function inspectionHtml(a) {
+function inspectionHtml(a, inspectionsForAsset, isLogging, isHistoryOpen) {
   const s = inspectionStatus(a);
   return `
-  <div class="card">
-    <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(a.id)}</div>
-    <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(a.name)}</div>
-    <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(a.location || "")}</div>
+  <div class="card" style="overflow:visible;">
+    <div class="row" style="gap:10px; align-items:flex-start;">
+      <div>
+        <input type="file" accept="image/*" id="as-file-${esc(a.id)}" style="display:none;" onchange="window.__uploadAssetPhoto('${esc(a.id)}')" />
+        ${a.photo_url
+          ? `<img src="${esc(a.photo_url)}" class="part-photo" title="Click to change photo" onclick="document.getElementById('as-file-${esc(a.id)}').click()" />`
+          : `<div class="part-photo" style="display:flex; align-items:center; justify-content:center; background:#EEEDE6; color:#8A9AA8; font-size:9px; text-align:center; padding:2px;" onclick="document.getElementById('as-file-${esc(a.id)}').click()">+ Photo</div>`}
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(a.id)}</div>
+        <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(a.name)}</div>
+        <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(a.location || "")}</div>
+      </div>
+    </div>
     <div style="margin-top:12px;">
       <label class="label">Inspection interval (days)</label>
       <div class="row" style="gap:8px;">
@@ -480,13 +546,50 @@ function inspectionHtml(a) {
         <button class="btn" onclick="window.__saveInterval('${esc(a.id)}')">Save</button>
       </div>
     </div>
-    <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
+
+    ${isLogging ? `
+    <div style="margin-top:12px; padding:10px; background:#EEEDE6; border-radius:4px;">
+      <label class="label">Result</label>
+      <select id="ins-result-${esc(a.id)}" style="margin-bottom:8px;">
+        <option value="pass">Pass</option>
+        <option value="fail">Fail — needs a work order</option>
+      </select>
+      <label class="label">Notes</label>
+      <textarea id="ins-notes-${esc(a.id)}" style="min-height:50px; margin-bottom:8px;" placeholder="What did you check or find?"></textarea>
+      <label class="label">Photos</label>
+      <input type="file" accept="image/*" multiple id="ins-photos-${esc(a.id)}" style="margin-bottom:10px;" />
+      <div class="row" style="gap:8px;">
+        <button class="btn btn-dark" onclick="window.__submitInspection('${esc(a.id)}')">Submit inspection</button>
+        <button class="btn" onclick="window.__toggleLogInspection(null)">Cancel</button>
+      </div>
+    </div>` : ""}
+
+    <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
       ${tagHtml(s.label, s.color, s.deep)}
-      <button class="btn" onclick="window.__markInspected('${esc(a.id)}')">Mark inspected today</button>
+      <div class="row" style="gap:6px;">
+        ${!isLogging ? `<button class="btn" onclick="window.__toggleLogInspection('${esc(a.id)}')">Log inspection</button>` : ""}
+        <button class="btn" onclick="window.__toggleInspectionHistory('${esc(a.id)}')">${isHistoryOpen ? "Hide history" : `History (${inspectionsForAsset.length})`}</button>
+      </div>
     </div>
     <div style="font-size:11px; color:#8A9AA8; margin-top:6px;">
       Last inspected ${esc(a.last_inspected || "never")}${s.dueDate ? ` &middot; next due ${esc(s.dueDate)}` : ""}
     </div>
+
+    ${isHistoryOpen ? `
+    <div style="border-top:1px solid #D8D5C9; margin-top:12px; padding-top:10px;">
+      ${inspectionsForAsset.length === 0 ? `<div style="font-size:12px; color:#8A9AA8;">No inspections logged yet.</div>` : inspectionsForAsset.map(ins => `
+        <div style="margin-bottom:10px;">
+          <div class="row" style="gap:8px; align-items:center;">
+            ${ins.result === "fail" ? tagHtml("Fail", "#C1443C", "#7A241F") : tagHtml("Pass", "#3F8354", "#204F30")}
+            <span style="font-size:12px; color:#8A9AA8;">${esc(fmt(ins.inspected_at))} by ${esc(ins.inspected_by)}</span>
+          </div>
+          ${ins.notes ? `<div style="font-size:13px; margin-top:4px;">${esc(ins.notes)}</div>` : ""}
+          ${(ins.photos || []).length > 0 ? `
+          <div class="row" style="gap:6px; margin-top:6px; flex-wrap:wrap;">
+            ${ins.photos.map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.url)}" style="width:40px; height:40px; object-fit:cover; border-radius:4px; border:1px solid #D8D5C9;" /></a>`).join("")}
+          </div>` : ""}
+        </div>`).join("")}
+    </div>` : ""}
   </div>`;
 }
 
@@ -648,10 +751,20 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
 function assetHtml(asset, openCount) {
   const st = ASSET_STATUS[asset.status];
   return `
-  <div class="card" style="position:relative;">
-    <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(asset.id)}</div>
-    <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(asset.name)}</div>
-    <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(asset.category || "")} &middot; ${esc(asset.location || "")}</div>
+  <div class="card" style="position:relative; overflow:visible;">
+    <div class="row" style="gap:10px; align-items:flex-start;">
+      <div>
+        <input type="file" accept="image/*" id="as-file-${esc(asset.id)}" style="display:none;" onchange="window.__uploadAssetPhoto('${esc(asset.id)}')" />
+        ${asset.photo_url
+          ? `<img src="${esc(asset.photo_url)}" class="part-photo" title="Click to change photo" onclick="document.getElementById('as-file-${esc(asset.id)}').click()" />`
+          : `<div class="part-photo" style="display:flex; align-items:center; justify-content:center; background:#EEEDE6; color:#8A9AA8; font-size:9px; text-align:center; padding:2px;" onclick="document.getElementById('as-file-${esc(asset.id)}').click()">+ Photo</div>`}
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(asset.id)}</div>
+        <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(asset.name)}</div>
+        <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(asset.category || "")} &middot; ${esc(asset.location || "")}</div>
+      </div>
+    </div>
     <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
       ${tagHtml(st.label, st.color, st.deep)}
       <div style="font-size:11px; color:#8A9AA8;">${openCount > 0 ? `${openCount} open order${openCount > 1 ? "s" : ""}` : "No open orders"}</div>
@@ -948,7 +1061,7 @@ function renderApp() {
       <div style="font-weight:700; font-size:22px; margin-bottom:16px;">Inspections</div>
       ${overdueInspections.length > 0 ? `<div class="err" style="background:#C1443C18; border-color:#C1443C55; color:#7A241F;">${overdueInspections.length} asset${overdueInspections.length > 1 ? "s" : ""} overdue for inspection.</div>` : ""}
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px;">
-        ${s.assets.map(inspectionHtml).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets yet.</div>`}
+        ${s.assets.map(a => inspectionHtml(a, s.inspections.filter(i => i.asset_id === a.id), s.loggingInspectionFor === a.id, s.inspectionHistoryFor === a.id)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets yet.</div>`}
       </div>
     `;
   } else if (s.tab === "team") {
@@ -1078,7 +1191,22 @@ window.__saveInterval = (assetId) => {
   if (!val || val <= 0) { state.err = "Enter a positive number of days."; render(); return; }
   saveInspectionInterval(assetId, val);
 };
-window.__markInspected = (assetId) => markInspected(assetId);
+window.__uploadAssetPhoto = (assetId) => {
+  const input = document.getElementById(`as-file-${assetId}`);
+  const file = input.files[0];
+  if (!file) return;
+  uploadAssetPhoto(assetId, file);
+  input.value = "";
+};
+window.__toggleLogInspection = (assetId) => { state.loggingInspectionFor = assetId; render(); };
+window.__toggleInspectionHistory = (assetId) => { state.inspectionHistoryFor = state.inspectionHistoryFor === assetId ? null : assetId; render(); };
+window.__submitInspection = (assetId) => {
+  const result = document.getElementById(`ins-result-${assetId}`).value;
+  const notes = document.getElementById(`ins-notes-${assetId}`).value.trim();
+  const fileInput = document.getElementById(`ins-photos-${assetId}`);
+  const files = fileInput.files ? Array.from(fileInput.files) : [];
+  submitInspection(assetId, result, notes, files);
+};
 window.__exportHistory = () => exportHistoryXlsx();
 window.__toggleHistorySelect = (id, checked) => { state.selectedHistory[id] = checked; render(); };
 window.__toggleHistorySelectAll = (checked) => {
