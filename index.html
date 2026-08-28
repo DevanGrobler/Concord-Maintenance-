@@ -18,6 +18,11 @@
   .row { display: flex; }
   .err { background: #C1443C18; border: 1px solid #C1443C55; color: #7A241F; border-radius: 4px; padding: 8px 12px; font-size: 12px; margin-bottom: 14px; }
   a { color: inherit; }
+  @media print {
+    body * { visibility: hidden; }
+    #jobcard-print, #jobcard-print * { visibility: visible; }
+    #jobcard-print { position: absolute; top: 0; left: 0; width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -65,6 +70,8 @@ let state = {
   showAddPart: false,
   logPartFor: null,
   expandedOrder: null,
+  jobCardFor: null,
+  selectedHistory: {},
   err: "",
 };
 
@@ -290,39 +297,143 @@ async function markInspected(assetId) {
   render();
 }
 
-function csvEscape(v) {
-  const s = (v === null || v === undefined) ? "" : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-function exportHistoryCsv() {
-  const rows = [["ID", "Title", "Asset", "Status", "Priority", "Assigned to", "Logged by", "Created", "Started", "Completed", "Parts used"]];
-  state.orders.forEach(wo => {
+async function exportHistoryXlsx() {
+  const selectedIds = Object.keys(state.selectedHistory).filter(id => state.selectedHistory[id]);
+  const rows = selectedIds.length > 0 ? state.orders.filter(o => selectedIds.includes(o.id)) : state.orders;
+
+  let ExcelJS;
+  try {
+    ExcelJS = (await import("https://esm.sh/exceljs@4.4.1")).default;
+  } catch (e) {
+    state.err = "Couldn't load the Excel export library. Check your internet connection and try again.";
+    render();
+    return;
+  }
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Work Orders");
+  ws.columns = [
+    { header: "ID", key: "id", width: 12 },
+    { header: "Title", key: "title", width: 30 },
+    { header: "Asset", key: "asset", width: 22 },
+    { header: "Status", key: "status", width: 14 },
+    { header: "Priority", key: "priority", width: 12 },
+    { header: "Assigned to", key: "assigned", width: 16 },
+    { header: "Logged by", key: "logged", width: 16 },
+    { header: "Created", key: "created", width: 20 },
+    { header: "Started", key: "started", width: 20 },
+    { header: "Completed", key: "completed", width: 20 },
+    { header: "Parts used", key: "parts", width: 30 },
+    { header: "Photo", key: "photo", width: 14 },
+  ];
+
+  for (const wo of rows) {
     const asset = state.assets.find(a => a.id === wo.asset_id);
     const parts = (wo.parts_used || []).map(pu => `${pu.quantity}x ${pu.part_name}`).join("; ");
-    rows.push([wo.id, wo.title, asset ? asset.name : "", wo.status, wo.priority, wo.assigned_to, wo.created_by, wo.created_at, wo.started_at || "", wo.completed_at || "", parts]);
-  });
-  const csv = rows.map(r => r.map(csvEscape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
+    const row = ws.addRow({
+      id: wo.id, title: wo.title, asset: asset ? asset.name : "", status: wo.status, priority: wo.priority,
+      assigned: wo.assigned_to, logged: wo.created_by, created: wo.created_at || "", started: wo.started_at || "",
+      completed: wo.completed_at || "", parts,
+    });
+    row.height = 56;
+    const photos = wo.photos || [];
+    if (photos.length > 0) {
+      try {
+        const resp = await fetch(photos[0].url);
+        const buf = await resp.arrayBuffer();
+        const ext = (photos[0].url.split(".").pop() || "png").toLowerCase().split("?")[0];
+        const safeExt = ["png", "jpg", "jpeg", "gif"].includes(ext) ? (ext === "jpg" ? "jpeg" : ext) : "png";
+        const imgId = wb.addImage({ buffer: buf, extension: safeExt });
+        ws.addImage(imgId, { tl: { col: 11, row: row.number - 1 }, ext: { width: 70, height: 70 } });
+      } catch (e) { /* skip photo if it can't be fetched */ }
+    }
+  }
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `depot-work-order-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `depot-work-order-history-${new Date().toISOString().slice(0, 10)}.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
 function historyRowHtml(wo, asset) {
   const st = STATUS[wo.status];
+  const photos = wo.photos || [];
   return `
   <tr style="border-bottom:1px solid #D8D5C9;">
+    <td style="padding:8px 10px;"><input type="checkbox" style="width:auto;" ${state.selectedHistory[wo.id] ? "checked" : ""} onchange="window.__toggleHistorySelect('${wo.id}', this.checked)" /></td>
     <td style="padding:8px 10px; font-family:monospace; font-size:11px; color:#8A9AA8;">${esc(wo.id)}</td>
-    <td style="padding:8px 10px;">${esc(wo.title)}</td>
+    <td style="padding:8px 10px;"><a href="#" onclick="window.__openJobCard('${wo.id}'); return false;" style="color:#1B222B; text-decoration:underline;">${esc(wo.title)}</a></td>
     <td style="padding:8px 10px; color:#4C6478;">${asset ? esc(asset.name) : "—"}</td>
     <td style="padding:8px 10px;">${tagHtml(st.label, st.color, st.deep)}</td>
     <td style="padding:8px 10px; color:#4C6478;">${esc(wo.assigned_to)}</td>
     <td style="padding:8px 10px; color:#8A9AA8; font-size:12px;">${esc(fmt(wo.created_at)) || ""}</td>
     <td style="padding:8px 10px; color:#8A9AA8; font-size:12px;">${esc(fmt(wo.completed_at)) || "—"}</td>
+    <td style="padding:8px 10px;">
+      ${photos.length > 0
+        ? `<div class="row" style="gap:4px;">${photos.slice(0, 3).map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.url)}" style="width:28px; height:28px; object-fit:cover; border-radius:3px; border:1px solid #D8D5C9;" /></a>`).join("")}${photos.length > 3 ? `<span style="font-size:11px; color:#8A9AA8; align-self:center;">+${photos.length - 3}</span>` : ""}</div>`
+        : `<span style="font-size:11px; color:#8A9AA8;">—</span>`}
+    </td>
+    <td style="padding:8px 10px;"><button class="btn" onclick="window.__openJobCard('${wo.id}')">Job card</button></td>
   </tr>`;
+}
+
+function jobCardHtml(wo, asset) {
+  const st = STATUS[wo.status];
+  const pr = PRIORITY[wo.priority];
+  const partsUsed = wo.parts_used || [];
+  const comments = wo.comments || [];
+  const photos = wo.photos || [];
+  return `
+  <div style="position:fixed; inset:0; background:rgba(27,34,43,0.5); z-index:50; display:flex; align-items:center; justify-content:center; padding:24px;" class="no-print">
+    <div style="background:#fff; max-width:640px; width:100%; max-height:90vh; overflow:auto; border-radius:6px; padding:24px;">
+      <div class="row no-print" style="justify-content:flex-end; gap:8px; margin-bottom:16px;">
+        <button class="btn btn-dark" onclick="window.print()">Print</button>
+        <button class="btn" onclick="window.__closeJobCard()">Close</button>
+      </div>
+      <div id="jobcard-print">
+        <div style="font-family:monospace; font-size:12px; color:#8A9AA8; font-weight:600;">${esc(wo.id)}</div>
+        <div style="font-weight:700; font-size:22px; margin-top:2px;">${esc(wo.title)}</div>
+        <div class="row" style="gap:8px; margin-top:8px;">
+          ${tagHtml(pr.label, pr.color, pr.color)}
+          ${tagHtml(st.label, st.color, st.deep)}
+        </div>
+        <div style="border-top:1px solid #D8D5C9; margin-top:16px; padding-top:12px;">
+          <div class="row" style="gap:24px; flex-wrap:wrap; font-size:13px;">
+            <div><span class="label" style="display:inline; margin:0;">Asset</span> ${asset ? esc(asset.name) : "—"}</div>
+            <div><span class="label" style="display:inline; margin:0;">Location</span> ${asset ? esc(asset.location || "—") : "—"}</div>
+            <div><span class="label" style="display:inline; margin:0;">Assigned to</span> ${esc(wo.assigned_to)}</div>
+            <div><span class="label" style="display:inline; margin:0;">Logged by</span> ${esc(wo.created_by)}</div>
+          </div>
+        </div>
+        <div class="row" style="gap:24px; flex-wrap:wrap; font-size:13px; margin-top:12px;">
+          <div><span class="label" style="display:inline; margin:0;">Created</span> ${esc(fmt(wo.created_at)) || "—"}</div>
+          <div><span class="label" style="display:inline; margin:0;">Started</span> ${esc(fmt(wo.started_at)) || "—"}</div>
+          <div><span class="label" style="display:inline; margin:0;">Completed</span> ${esc(fmt(wo.completed_at)) || "—"}</div>
+        </div>
+        ${wo.notes ? `<div style="margin-top:16px;"><div class="label">Notes</div><div style="font-size:13px;">${esc(wo.notes)}</div></div>` : ""}
+        <div style="margin-top:16px;">
+          <div class="label">Parts used</div>
+          ${partsUsed.length > 0 ? `<div style="font-size:13px;">${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : `<div style="font-size:13px; color:#8A9AA8;">None</div>`}
+        </div>
+        ${photos.length > 0 ? `
+        <div style="margin-top:16px;">
+          <div class="label">Photos</div>
+          <div class="row" style="gap:8px; flex-wrap:wrap;">
+            ${photos.map(p => `<img src="${esc(p.url)}" style="width:110px; height:110px; object-fit:cover; border-radius:4px; border:1px solid #D8D5C9;" />`).join("")}
+          </div>
+        </div>` : ""}
+        ${comments.length > 0 ? `
+        <div style="margin-top:16px;">
+          <div class="label">Comments</div>
+          ${comments.map(c => `<div style="font-size:13px; margin-bottom:6px;"><strong style="font-weight:500;">${esc(c.author)}</strong> <span style="color:#8A9AA8; font-size:12px;">${esc(fmt(c.at))}</span><br/>${esc(c.text)}</div>`).join("")}
+        </div>` : ""}
+      </div>
+    </div>
+  </div>`;
 }
 
 function inspectionHtml(a) {
@@ -712,15 +823,17 @@ function renderApp() {
       </div>
     `;
   } else if (s.tab === "history") {
+    const selectedCount = Object.values(s.selectedHistory).filter(Boolean).length;
     main = `
       <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
         <div style="font-weight:700; font-size:22px;">Work order history</div>
-        <button class="btn btn-dark" onclick="window.__exportCsv()">Export to Excel (CSV)</button>
+        <button class="btn btn-dark" onclick="window.__exportHistory()">Export to Excel${selectedCount > 0 ? ` (${selectedCount} selected)` : " (all)"}</button>
       </div>
       <div class="card" style="overflow-x:auto; padding:0;">
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
           <thead>
             <tr style="border-bottom:1px solid #D8D5C9; text-align:left;">
+              <th style="padding:8px 10px;"><input type="checkbox" style="width:auto;" onchange="window.__toggleHistorySelectAll(this.checked)" /></th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">ID</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Title</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Asset</th>
@@ -728,13 +841,16 @@ function renderApp() {
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Assigned</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Created</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Completed</th>
+              <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Photos</th>
+              <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;"></th>
             </tr>
           </thead>
           <tbody>
-            ${[...s.orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="7" style="padding:16px; color:#8A9AA8;">No work orders yet.</td></tr>`}
+            ${[...s.orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="10" style="padding:16px; color:#8A9AA8;">No work orders yet.</td></tr>`}
           </tbody>
         </table>
       </div>
+      ${s.jobCardFor ? jobCardHtml(s.orders.find(o => o.id === s.jobCardFor), s.assets.find(a => a.id === (s.orders.find(o => o.id === s.jobCardFor) || {}).asset_id)) : ""}
     `;
   } else if (s.tab === "inspections") {
     main = `
@@ -857,7 +973,14 @@ window.__saveInterval = (assetId) => {
   saveInspectionInterval(assetId, val);
 };
 window.__markInspected = (assetId) => markInspected(assetId);
-window.__exportCsv = () => exportHistoryCsv();
+window.__exportHistory = () => exportHistoryXlsx();
+window.__toggleHistorySelect = (id, checked) => { state.selectedHistory[id] = checked; render(); };
+window.__toggleHistorySelectAll = (checked) => {
+  state.orders.forEach(o => { state.selectedHistory[o.id] = checked; });
+  render();
+};
+window.__openJobCard = (id) => { state.jobCardFor = id; render(); };
+window.__closeJobCard = () => { state.jobCardFor = null; render(); };
 window.__uploadPhoto = (orderId) => {
   const input = document.getElementById(`ph-file-${orderId}`);
   const file = input.files[0];
