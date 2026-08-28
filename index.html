@@ -27,8 +27,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // ---- Your Supabase project details ----
-const SUPABASE_URL = "https://axtegiyuifinsjpkznuy.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4dGVnaXl1aWZpbnNqcGt6bnV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NzgzOTEsImV4cCI6MjEwMzQ1NDM5MX0.rQACjU-MkV5q8kaq1suTEmMsincK5f5I_TbDC_bKWYs";
+const SUPABASE_URL = "PASTE_YOUR_SUPABASE_URL_HERE";
+const SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY_HERE";
 // ----------------------------------------
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -320,7 +320,7 @@ function teamMemberRow(m) {
   return `
   <div class="row" style="justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #D8D5C9;">
     <div>
-      <div style="font-weight:500; font-size:14px;">${esc(m.username)} ${m.id === state.currentUser.id ? "<span style=\\"color:#8A9AA8; font-size:11px;\\">(you)</span>" : ""}</div>
+      <div style="font-weight:500; font-size:14px;">${esc(m.username)} ${m.id === state.currentUser.id ? "<span style='color:#8A9AA8; font-size:11px;'>(you)</span>" : ""}</div>
       <div style="font-size:11px; color:#8A9AA8;">${m.is_admin ? "Admin" : "Team member"}</div>
     </div>
     ${m.id !== state.currentUser.id ? `<button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__removeMember('${m.id}')">Remove</button>` : ""}
@@ -429,7 +429,7 @@ function renderApp() {
       ${nav("assets", "Assets")}
       ${s.currentUser.is_admin ? nav("team", "Team") : ""}
       <div style="margin-top:auto; padding-top:16px; border-top:1px solid #D8D5C9;">
-        <div style="font-size:13px; font-weight:500;">${esc(s.currentUser.username)} ${s.currentUser.is_admin ? "<span style=\\"color:#8A9AA8; font-size:11px;\\">(admin)</span>" : ""}</div>
+        <div style="font-size:13px; font-weight:500;">${esc(s.currentUser.username)} ${s.currentUser.is_admin ? "<span style='color:#8A9AA8; font-size:11px;'>(admin)</span>" : ""}</div>
         <button class="btn" style="margin-top:6px; padding:4px 8px; font-size:11px;" onclick="window.__signOut()">Sign out</button>
       </div>
     </div>
