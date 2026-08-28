@@ -26,10 +26,10 @@
 <script type="module">
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// ---- Paste your Supabase project details here ----
+// ---- Your Supabase project details ----
 const SUPABASE_URL = "https://axtegiyuifinsjpkznuy.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4dGVnaXl1aWZpbnNqcGt6bnV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NzgzOTEsImV4cCI6MjEwMzQ1NDM5MX0.rQACjU-MkV5q8kaq1suTEmMsincK5f5I_TbDC_bKWYs";
-// ----------------------------------------------------
+// ----------------------------------------
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -51,22 +51,28 @@ const ASSET_STATUS = {
 };
 
 let state = {
-  session: null,
-  profile: null,
   ready: false,
+  team: [],
+  currentUser: null,
   assets: [],
   orders: [],
   tab: "dashboard",
   filter: "all",
   query: "",
   showForm: false,
-  authMode: "signin",
+  showAddMember: false,
   err: "",
 };
 
 function uid(prefix) { return `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`; }
 function daysUntil(d) { if (!d) return 999; return Math.ceil((new Date(d) - new Date()) / 86400000); }
 function esc(s) { return (s || "").toString().replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+async function loadTeam() {
+  const { data, error } = await supabase.from("team_members").select("*").order("username");
+  if (error) { state.err = error.message; return; }
+  state.team = data || [];
+}
 
 async function loadData() {
   const [a, o] = await Promise.all([
@@ -77,53 +83,80 @@ async function loadData() {
   if (o.error) state.err = o.error.message;
   state.assets = a.data || [];
   state.orders = o.data || [];
-  render();
 }
 
 async function init() {
-  const { data: { session } } = await supabase.auth.getSession();
-  state.session = session;
-  if (session) {
-    const { data } = await supabase.from("profiles").select("username").eq("id", session.user.id).single();
-    state.profile = data;
-    await loadData();
-    supabase
-      .channel("depot-changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "assets" }, loadData)
-      .on("postgres_changes", { event: "*", schema: "public", table: "work_orders" }, loadData)
-      .subscribe();
+  await loadTeam();
+  const savedId = localStorage.getItem("depot-user-id");
+  if (savedId) {
+    const match = state.team.find(m => m.id === savedId);
+    if (match) {
+      state.currentUser = match;
+      await loadData();
+      subscribeRealtime();
+    } else {
+      localStorage.removeItem("depot-user-id");
+    }
   }
   state.ready = true;
   render();
-
-  supabase.auth.onAuthStateChange(async (_e, session) => {
-    state.session = session;
-    if (session) {
-      const { data } = await supabase.from("profiles").select("username").eq("id", session.user.id).single();
-      state.profile = data;
-      await loadData();
-    } else {
-      state.profile = null;
-    }
-    render();
-  });
 }
 
-async function signIn(email, password) {
-  state.err = "";
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) { state.err = error.message; render(); }
+function subscribeRealtime() {
+  supabase
+    .channel("depot-changes")
+    .on("postgres_changes", { event: "*", schema: "public", table: "assets" }, async () => { await loadData(); render(); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "work_orders" }, async () => { await loadData(); render(); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, async () => { await loadTeam(); render(); })
+    .subscribe();
 }
-async function signUp(email, password, username) {
+
+async function createAdmin(username, pin) {
   state.err = "";
-  const { data, error } = await supabase.auth.signUp({ email, password });
+  const member = { id: uid("U"), username, pin, is_admin: true };
+  const { error } = await supabase.from("team_members").insert(member);
   if (error) { state.err = error.message; render(); return; }
-  if (data.user) {
-    const { error: profileErr } = await supabase.from("profiles").insert({ id: data.user.id, username });
-    if (profileErr) { state.err = profileErr.message; render(); return; }
-  }
+  await loadTeam();
+  state.currentUser = state.team.find(m => m.id === member.id) || member;
+  localStorage.setItem("depot-user-id", state.currentUser.id);
+  await loadData();
+  subscribeRealtime();
+  render();
 }
-async function signOut() { await supabase.auth.signOut(); }
+
+function login(username, pin) {
+  state.err = "";
+  const member = state.team.find(m => m.username === username && m.pin === pin);
+  if (!member) { state.err = "That name and PIN don't match."; render(); return; }
+  state.currentUser = member;
+  localStorage.setItem("depot-user-id", member.id);
+  loadData().then(() => { subscribeRealtime(); render(); });
+}
+
+function logout() {
+  localStorage.removeItem("depot-user-id");
+  state.currentUser = null;
+  render();
+}
+
+async function addMember(username, pin, isAdmin) {
+  state.err = "";
+  if (state.team.some(m => m.username.toLowerCase() === username.toLowerCase())) {
+    state.err = "That name is already on the team."; render(); return;
+  }
+  const { error } = await supabase.from("team_members").insert({ id: uid("U"), username, pin, is_admin: isAdmin });
+  if (error) { state.err = error.message; render(); return; }
+  state.showAddMember = false;
+  await loadTeam();
+  render();
+}
+async function removeMember(id) {
+  if (id === state.currentUser.id) { state.err = "You can't remove your own account while signed in."; render(); return; }
+  const { error } = await supabase.from("team_members").delete().eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadTeam();
+  render();
+}
 
 async function createOrder(wo) {
   const { error } = await supabase.from("work_orders").insert({
@@ -131,49 +164,59 @@ async function createOrder(wo) {
     status: "open", assigned_to: wo.assignedTo, created_by: wo.createdBy,
     due_date: wo.dueDate, notes: wo.notes,
   });
-  if (error) { state.err = error.message; render(); } else { state.showForm = false; await loadData(); }
+  if (error) { state.err = error.message; render(); } else { state.showForm = false; await loadData(); render(); }
 }
 async function advanceOrder(id) {
   const cur = state.orders.find(o => o.id === id);
   if (!cur) return;
   const next = cur.status === "open" ? "in-progress" : "done";
   const { error } = await supabase.from("work_orders").update({ status: next }).eq("id", id);
-  if (error) { state.err = error.message; render(); } else { await loadData(); }
+  if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
 }
 async function deleteOrder(id) {
   const { error } = await supabase.from("work_orders").delete().eq("id", id);
-  if (error) { state.err = error.message; render(); } else { await loadData(); }
+  if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
+}
+
+function renderSetup() {
+  return `
+  <div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;">
+    <div class="card" style="width:340px;">
+      <div style="font-weight:700; font-size:22px;">DEPOT</div>
+      <div style="font-size:12px; color:#8A9AA8; margin-bottom:20px;">No team set up yet. Create the first account — you'll be the admin and can add teammates afterward.</div>
+      <div style="margin-bottom:10px;">
+        <label class="label">Your name</label>
+        <input id="su-username" placeholder="e.g. Jordan" />
+      </div>
+      <div style="margin-bottom:14px;">
+        <label class="label">Choose a 4-digit PIN</label>
+        <input id="su-pin" type="password" inputmode="numeric" maxlength="4" placeholder="••••" />
+      </div>
+      <button class="btn btn-dark" style="width:100%; justify-content:center; padding:9px 0;" onclick="window.__submitSetup()">Create admin account</button>
+      ${state.err ? `<div class="err" style="margin-top:10px;">${esc(state.err)}</div>` : ""}
+    </div>
+  </div>`;
 }
 
 function renderLogin() {
-  const s = state;
   return `
   <div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;">
     <div class="card" style="width:340px;">
       <div style="font-weight:700; font-size:22px;">DEPOT</div>
       <div style="font-size:12px; color:#8A9AA8; margin-bottom:20px;">Sign in to your team's maintenance board.</div>
-      <div class="row" style="gap:6px; margin-bottom:16px;">
-        <button class="btn ${s.authMode === "signin" ? "btn-active" : ""}" style="flex:1; justify-content:center;" onclick="window.__setAuthMode('signin')">Sign in</button>
-        <button class="btn ${s.authMode === "signup" ? "btn-active" : ""}" style="flex:1; justify-content:center;" onclick="window.__setAuthMode('signup')">Create account</button>
-      </div>
-      ${s.authMode === "signup" ? `
       <div style="margin-bottom:10px;">
-        <label class="label">Display name</label>
-        <input id="f-username" placeholder="e.g. Jordan" />
-      </div>` : ""}
-      <div style="margin-bottom:10px;">
-        <label class="label">Email</label>
-        <input id="f-email" type="email" placeholder="name@company.com" />
+        <label class="label">Name</label>
+        <select id="li-username">
+          ${state.team.map(m => `<option value="${esc(m.username)}">${esc(m.username)}</option>`).join("")}
+        </select>
       </div>
       <div style="margin-bottom:14px;">
-        <label class="label">Password</label>
-        <input id="f-password" type="password" placeholder="At least 6 characters" />
+        <label class="label">PIN</label>
+        <input id="li-pin" type="password" inputmode="numeric" maxlength="4" placeholder="••••" />
       </div>
-      <button class="btn btn-dark" style="width:100%; justify-content:center; padding:9px 0;" onclick="window.__submitAuth()">
-        ${s.authMode === "signup" ? "Create account" : "Sign in"}
-      </button>
-      ${s.err ? `<div class="err" style="margin-top:10px;">${esc(s.err)}</div>` : ""}
-      ${s.authMode === "signup" ? `<div style="font-size:11px; color:#8A9AA8; margin-top:16px;">If your Supabase project has email confirmation on, check your inbox to confirm before signing in.</div>` : ""}
+      <button class="btn btn-dark" style="width:100%; justify-content:center; padding:9px 0;" onclick="window.__submitLogin()">Sign in</button>
+      ${state.err ? `<div class="err" style="margin-top:10px;">${esc(state.err)}</div>` : ""}
+      <div style="font-size:11px; color:#8A9AA8; margin-top:16px;">Don't see your name? Ask your admin to add you from the Team tab.</div>
     </div>
   </div>`;
 }
@@ -252,7 +295,10 @@ function formHtml() {
       </div>
       <div>
         <label class="label">Assign to</label>
-        <input id="nf-assigned" value="${esc(s.profile?.username || "")}" />
+        <select id="nf-assigned">
+          <option value="Unassigned">Unassigned</option>
+          ${s.team.map(m => `<option value="${esc(m.username)}" ${m.id === s.currentUser.id ? "selected" : ""}>${esc(m.username)}</option>`).join("")}
+        </select>
       </div>
       <div>
         <label class="label">Due date</label>
@@ -266,6 +312,40 @@ function formHtml() {
     <div class="row" style="gap:8px;">
       <button class="btn btn-dark" onclick="window.__createOrder()">Create work order</button>
       <button class="btn" onclick="window.__toggleForm(false)">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function teamMemberRow(m) {
+  return `
+  <div class="row" style="justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #D8D5C9;">
+    <div>
+      <div style="font-weight:500; font-size:14px;">${esc(m.username)} ${m.id === state.currentUser.id ? "<span style=\\"color:#8A9AA8; font-size:11px;\\">(you)</span>" : ""}</div>
+      <div style="font-size:11px; color:#8A9AA8;">${m.is_admin ? "Admin" : "Team member"}</div>
+    </div>
+    ${m.id !== state.currentUser.id ? `<button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__removeMember('${m.id}')">Remove</button>` : ""}
+  </div>`;
+}
+
+function addMemberFormHtml() {
+  return `
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Add teammate</div>
+    <div style="margin-bottom:10px;">
+      <label class="label">Name</label>
+      <input id="am-username" placeholder="e.g. Priya" />
+    </div>
+    <div style="margin-bottom:10px;">
+      <label class="label">4-digit PIN</label>
+      <input id="am-pin" type="password" inputmode="numeric" maxlength="4" placeholder="••••" />
+    </div>
+    <div style="margin-bottom:14px; display:flex; align-items:center; gap:8px;">
+      <input id="am-admin" type="checkbox" style="width:auto;" />
+      <label for="am-admin" style="font-size:13px;">Make this person an admin too</label>
+    </div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-dark" onclick="window.__submitAddMember()">Add teammate</button>
+      <button class="btn" onclick="window.__toggleAddMember(false)">Cancel</button>
     </div>
   </div>`;
 }
@@ -292,7 +372,7 @@ function renderApp() {
   if (s.tab === "dashboard") {
     main = `
       <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:18px;">
-        <div style="font-weight:700; font-size:22px;">Welcome back, ${esc(s.profile?.username || "")}</div>
+        <div style="font-weight:700; font-size:22px;">Welcome back, ${esc(s.currentUser.username)}</div>
         <button class="btn btn-dark" onclick="window.__setTab('work-orders'); window.__toggleForm(true)">+ New work order</button>
       </div>
       <div class="row" style="gap:12px; margin-bottom:22px; flex-wrap:wrap;">
@@ -324,6 +404,17 @@ function renderApp() {
         ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length)).join("")}
       </div>
     `;
+  } else if (s.tab === "team") {
+    main = `
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div style="font-weight:700; font-size:22px;">Team</div>
+        ${!s.showAddMember ? `<button class="btn btn-dark" onclick="window.__toggleAddMember(true)">+ Add teammate</button>` : ""}
+      </div>
+      ${s.showAddMember ? addMemberFormHtml() : ""}
+      <div class="card">
+        ${s.team.map(teamMemberRow).join("")}
+      </div>
+    `;
   }
 
   return `
@@ -336,8 +427,9 @@ function renderApp() {
       ${nav("dashboard", "Dashboard")}
       ${nav("work-orders", "Work orders")}
       ${nav("assets", "Assets")}
+      ${s.currentUser.is_admin ? nav("team", "Team") : ""}
       <div style="margin-top:auto; padding-top:16px; border-top:1px solid #D8D5C9;">
-        <div style="font-size:13px; font-weight:500;">${esc(s.profile?.username || "")}</div>
+        <div style="font-size:13px; font-weight:500;">${esc(s.currentUser.username)} ${s.currentUser.is_admin ? "<span style=\\"color:#8A9AA8; font-size:11px;\\">(admin)</span>" : ""}</div>
         <button class="btn" style="margin-top:6px; padding:4px 8px; font-size:11px;" onclick="window.__signOut()">Sign out</button>
       </div>
     </div>
@@ -351,29 +443,41 @@ function renderApp() {
 function render() {
   const app = document.getElementById("app");
   if (!state.ready) { app.innerHTML = `<div style="padding:40px; text-align:center; color:#4C6478;">Loading depot...</div>`; return; }
-  if (!state.session) { app.innerHTML = renderLogin(); return; }
-  if (!state.profile) { app.innerHTML = `<div style="padding:40px; text-align:center; color:#4C6478;">Setting up your profile...</div>`; return; }
+  if (!state.currentUser) {
+    app.innerHTML = state.team.length === 0 ? renderSetup() : renderLogin();
+    return;
+  }
   app.innerHTML = renderApp();
 }
 
-// ---- global handlers (needed since we rebuild innerHTML each render) ----
-window.__setAuthMode = (m) => { state.authMode = m; state.err = ""; render(); };
-window.__submitAuth = () => {
-  const email = document.getElementById("f-email").value.trim();
-  const password = document.getElementById("f-password").value;
-  if (state.authMode === "signup") {
-    const username = document.getElementById("f-username").value.trim();
-    if (!username) { state.err = "Enter a display name."; render(); return; }
-    signUp(email, password, username);
-  } else {
-    signIn(email, password);
-  }
+// ---- global handlers ----
+window.__submitSetup = () => {
+  const username = document.getElementById("su-username").value.trim();
+  const pin = document.getElementById("su-pin").value;
+  if (!username) { state.err = "Enter your name."; render(); return; }
+  if (!/^\d{4}$/.test(pin)) { state.err = "PIN needs to be 4 digits."; render(); return; }
+  createAdmin(username, pin);
 };
-window.__signOut = () => signOut();
+window.__submitLogin = () => {
+  const username = document.getElementById("li-username").value;
+  const pin = document.getElementById("li-pin").value;
+  login(username, pin);
+};
+window.__signOut = () => logout();
 window.__setTab = (t) => { state.tab = t; render(); };
 window.__setFilter = (f) => { state.filter = f; render(); };
 window.__setQuery = (q) => { state.query = q; render(); };
 window.__toggleForm = (v) => { state.showForm = v; render(); };
+window.__toggleAddMember = (v) => { state.showAddMember = v; state.err = ""; render(); };
+window.__submitAddMember = () => {
+  const username = document.getElementById("am-username").value.trim();
+  const pin = document.getElementById("am-pin").value;
+  const isAdmin = document.getElementById("am-admin").checked;
+  if (!username) { state.err = "Enter a name."; render(); return; }
+  if (!/^\d{4}$/.test(pin)) { state.err = "PIN needs to be 4 digits."; render(); return; }
+  addMember(username, pin, isAdmin);
+};
+window.__removeMember = (id) => removeMember(id);
 window.__advance = (id) => advanceOrder(id);
 window.__delete = (id) => deleteOrder(id);
 window.__createOrder = () => {
@@ -384,8 +488,8 @@ window.__createOrder = () => {
     title,
     assetId: document.getElementById("nf-asset").value,
     priority: document.getElementById("nf-priority").value,
-    assignedTo: document.getElementById("nf-assigned").value.trim() || "Unassigned",
-    createdBy: state.profile?.username || "Unknown",
+    assignedTo: document.getElementById("nf-assigned").value,
+    createdBy: state.currentUser.username,
     dueDate: document.getElementById("nf-due").value || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
     notes: document.getElementById("nf-notes").value.trim(),
   });
