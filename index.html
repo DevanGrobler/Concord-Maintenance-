@@ -56,11 +56,13 @@ let state = {
   currentUser: null,
   assets: [],
   orders: [],
+  parts: [],
   tab: "dashboard",
   filter: "all",
   query: "",
   showForm: false,
   showAddMember: false,
+  showAddPart: false,
   err: "",
 };
 
@@ -75,14 +77,17 @@ async function loadTeam() {
 }
 
 async function loadData() {
-  const [a, o] = await Promise.all([
+  const [a, o, p] = await Promise.all([
     supabase.from("assets").select("*").order("id"),
     supabase.from("work_orders").select("*").order("created_at", { ascending: false }),
+    supabase.from("parts").select("*").order("name"),
   ]);
   if (a.error) state.err = a.error.message;
   if (o.error) state.err = o.error.message;
+  if (p.error) state.err = p.error.message;
   state.assets = a.data || [];
   state.orders = o.data || [];
+  state.parts = p.data || [];
 }
 
 async function init() {
@@ -107,6 +112,7 @@ function subscribeRealtime() {
     .channel("depot-changes")
     .on("postgres_changes", { event: "*", schema: "public", table: "assets" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "work_orders" }, async () => { await loadData(); render(); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "parts" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, async () => { await loadTeam(); render(); })
     .subscribe();
 }
@@ -176,6 +182,29 @@ async function advanceOrder(id) {
 async function deleteOrder(id) {
   const { error } = await supabase.from("work_orders").delete().eq("id", id);
   if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
+}
+
+async function addPart(name, category, unit, stock, buffer) {
+  state.err = "";
+  const { error } = await supabase.from("parts").insert({
+    id: uid("PT"), name, category, unit, stock_on_hand: stock, buffer_stock: buffer,
+  });
+  if (error) { state.err = error.message; render(); return; }
+  state.showAddPart = false;
+  await loadData();
+  render();
+}
+async function savePart(id, stock, buffer) {
+  const { error } = await supabase.from("parts").update({ stock_on_hand: stock, buffer_stock: buffer }).eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
+}
+async function deletePart(id) {
+  const { error } = await supabase.from("parts").delete().eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
 }
 
 function renderSetup() {
@@ -350,12 +379,74 @@ function addMemberFormHtml() {
   </div>`;
 }
 
+function partHtml(p) {
+  const needsReorder = p.stock_on_hand <= p.buffer_stock;
+  return `
+  <div class="card" style="position:relative;">
+    <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(p.id)}</div>
+    <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(p.name)}</div>
+    <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(p.category || "")} &middot; unit: ${esc(p.unit)}</div>
+    <div style="margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+      <div>
+        <label class="label">Stock on hand</label>
+        <input type="number" min="0" id="pt-stock-${esc(p.id)}" value="${p.stock_on_hand}" />
+      </div>
+      <div>
+        <label class="label">Buffer stock</label>
+        <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
+      </div>
+    </div>
+    <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
+      ${needsReorder ? tagHtml("Reorder needed", "#C1443C", "#7A241F") : tagHtml("Stock OK", "#3F8354", "#204F30")}
+      <div class="row" style="gap:6px;">
+        <button class="btn" onclick="window.__savePart('${p.id}')">Save</button>
+        <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deletePart('${p.id}')">Delete</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function addPartFormHtml() {
+  return `
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Add part</div>
+    <div style="margin-bottom:10px;">
+      <label class="label">Part name</label>
+      <input id="ap-name" placeholder="e.g. HVAC filter, 20x20" />
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+      <div>
+        <label class="label">Category</label>
+        <input id="ap-category" placeholder="e.g. HVAC" />
+      </div>
+      <div>
+        <label class="label">Unit</label>
+        <input id="ap-unit" placeholder="e.g. ea, box, litre" value="ea" />
+      </div>
+      <div>
+        <label class="label">Starting stock on hand</label>
+        <input type="number" min="0" id="ap-stock" value="0" />
+      </div>
+      <div>
+        <label class="label">Buffer stock</label>
+        <input type="number" min="0" id="ap-buffer" value="0" />
+      </div>
+    </div>
+    <div style="font-size:11px; color:#8A9AA8; margin-bottom:14px;">When stock on hand drops to or below the buffer level, this part is flagged as needing reorder.</div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-dark" onclick="window.__submitAddPart()">Add part</button>
+      <button class="btn" onclick="window.__toggleAddPart(false)">Cancel</button>
+    </div>
+  </div>`;
+}
+
 function renderApp() {
   const s = state;
   const openOrders = s.orders.filter(o => o.status !== "done");
   const overdueOrders = openOrders.filter(o => daysUntil(o.due_date) < 0);
   const attentionAssets = s.assets.filter(a => a.status !== "operational");
   const doneOrders = s.orders.filter(o => o.status === "done");
+  const reorderParts = s.parts.filter(p => p.stock_on_hand <= p.buffer_stock);
 
   let filtered = s.orders;
   if (s.filter !== "all") filtered = filtered.filter(o => o.status === s.filter);
@@ -380,6 +471,7 @@ function renderApp() {
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Overdue</div><div style="font-size:30px; font-weight:700; color:${overdueOrders.length ? "#C1443C" : "#1B222B"};">${overdueOrders.length}</div></div>
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Assets needing attention</div><div style="font-size:30px; font-weight:700; color:${attentionAssets.length ? "#8C5E12" : "#1B222B"};">${attentionAssets.length}</div></div>
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Completed</div><div style="font-size:30px; font-weight:700; color:#204F30;">${doneOrders.length}</div></div>
+        <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Parts to reorder</div><div style="font-size:30px; font-weight:700; color:${reorderParts.length ? "#C1443C" : "#1B222B"};">${reorderParts.length}</div></div>
       </div>
       <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Needs attention</div>
       ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
@@ -402,6 +494,18 @@ function renderApp() {
       <div style="font-weight:700; font-size:22px; margin-bottom:16px;">Assets</div>
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
         ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length)).join("")}
+      </div>
+    `;
+  } else if (s.tab === "parts") {
+    main = `
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div style="font-weight:700; font-size:22px;">Parts</div>
+        ${!s.showAddPart ? `<button class="btn btn-dark" onclick="window.__toggleAddPart(true)">+ Add part</button>` : ""}
+      </div>
+      ${s.showAddPart ? addPartFormHtml() : ""}
+      ${reorderParts.length > 0 ? `<div class="err" style="background:#E3A73B18; border-color:#E3A73B55; color:#8C5E12;">${reorderParts.length} part${reorderParts.length > 1 ? "s are" : " is"} at or below buffer stock and may need reordering.</div>` : ""}
+      <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
+        ${s.parts.map(partHtml).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts added yet.</div>`}
       </div>
     `;
   } else if (s.tab === "team") {
@@ -427,6 +531,7 @@ function renderApp() {
       ${nav("dashboard", "Dashboard")}
       ${nav("work-orders", "Work orders")}
       ${nav("assets", "Assets")}
+      ${nav("parts", "Parts")}
       ${s.currentUser.is_admin ? nav("team", "Team") : ""}
       <div style="margin-top:auto; padding-top:16px; border-top:1px solid #D8D5C9;">
         <div style="font-size:13px; font-weight:500;">${esc(s.currentUser.username)} ${s.currentUser.is_admin ? "<span style='color:#8A9AA8; font-size:11px;'>(admin)</span>" : ""}</div>
@@ -478,6 +583,22 @@ window.__submitAddMember = () => {
   addMember(username, pin, isAdmin);
 };
 window.__removeMember = (id) => removeMember(id);
+window.__toggleAddPart = (v) => { state.showAddPart = v; state.err = ""; render(); };
+window.__submitAddPart = () => {
+  const name = document.getElementById("ap-name").value.trim();
+  const category = document.getElementById("ap-category").value.trim();
+  const unit = document.getElementById("ap-unit").value.trim() || "ea";
+  const stock = parseInt(document.getElementById("ap-stock").value, 10) || 0;
+  const buffer = parseInt(document.getElementById("ap-buffer").value, 10) || 0;
+  if (!name) { state.err = "Enter a part name."; render(); return; }
+  addPart(name, category, unit, stock, buffer);
+};
+window.__savePart = (id) => {
+  const stock = parseInt(document.getElementById(`pt-stock-${id}`).value, 10) || 0;
+  const buffer = parseInt(document.getElementById(`pt-buffer-${id}`).value, 10) || 0;
+  savePart(id, stock, buffer);
+};
+window.__deletePart = (id) => deletePart(id);
 window.__advance = (id) => advanceOrder(id);
 window.__delete = (id) => deleteOrder(id);
 window.__createOrder = () => {
