@@ -28,6 +28,7 @@
 <body>
 <div id="app"></div>
 
+<script src="https://unpkg.com/exceljs@4.4.1/dist/exceljs.min.js"></script>
 <script type="module">
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -301,14 +302,12 @@ async function exportHistoryXlsx() {
   const selectedIds = Object.keys(state.selectedHistory).filter(id => state.selectedHistory[id]);
   const rows = selectedIds.length > 0 ? state.orders.filter(o => selectedIds.includes(o.id)) : state.orders;
 
-  let ExcelJS;
-  try {
-    ExcelJS = (await import("https://esm.sh/exceljs@4.4.1")).default;
-  } catch (e) {
-    state.err = "Couldn't load the Excel export library. Check your internet connection and try again.";
+  if (!window.ExcelJS) {
+    state.err = "The Excel export library didn't load. Check your internet connection, refresh the page, and try again.";
     render();
     return;
   }
+  const ExcelJS = window.ExcelJS;
 
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Work Orders");
