@@ -64,12 +64,14 @@ let state = {
   showAddMember: false,
   showAddPart: false,
   logPartFor: null,
+  expandedOrder: null,
   err: "",
 };
 
 function uid(prefix) { return `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`; }
 function daysUntil(d) { if (!d) return 999; return Math.ceil((new Date(d) - new Date()) / 86400000); }
 function esc(s) { return (s || "").toString().replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmt(iso) { if (!iso) return null; return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
 
 async function loadTeam() {
   const { data, error } = await supabase.from("team_members").select("*").order("username");
@@ -177,12 +179,25 @@ async function advanceOrder(id) {
   const cur = state.orders.find(o => o.id === id);
   if (!cur) return;
   const next = cur.status === "open" ? "in-progress" : "done";
-  const { error } = await supabase.from("work_orders").update({ status: next }).eq("id", id);
+  const patch = { status: next };
+  if (next === "in-progress") patch.started_at = new Date().toISOString();
+  if (next === "done") patch.completed_at = new Date().toISOString();
+  const { error } = await supabase.from("work_orders").update(patch).eq("id", id);
   if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
 }
 async function deleteOrder(id) {
   const { error } = await supabase.from("work_orders").delete().eq("id", id);
   if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
+}
+
+async function addComment(orderId, text) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order || !text.trim()) return;
+  const nextComments = [...(order.comments || []), { author: state.currentUser.username, text: text.trim(), at: new Date().toISOString() }];
+  const { error } = await supabase.from("work_orders").update({ comments: nextComments }).eq("id", orderId);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
 }
 
 async function logPartUsage(orderId, partId, qty) {
@@ -273,17 +288,57 @@ function tagHtml(label, color, deep) {
   return `<span class="tag" style="color:${deep}; background:${color}26; border:1px solid ${color}66;">${esc(label)}</span>`;
 }
 
-function ticketHtml(wo, asset, parts, logPartFor) {
+function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
   const st = STATUS[wo.status];
   const pr = PRIORITY[wo.priority];
   const overdue = wo.status !== "done" && daysUntil(wo.due_date) < 0;
   const partsUsed = wo.parts_used || [];
+  const comments = wo.comments || [];
   const isLogging = logPartFor === wo.id;
+  const isOpen = expandedOrder === wo.id;
+
+  const detail = !isOpen ? "" : `
+    <div style="border-top:1px solid #D8D5C9; margin-top:12px; padding-top:12px;">
+      <div class="row" style="gap:18px; flex-wrap:wrap; font-size:12px; color:#4C6478; margin-bottom:12px;">
+        <div><span class="label" style="display:inline; margin:0;">Started</span> ${fmt(wo.started_at) ? esc(fmt(wo.started_at)) : "Not started yet"}</div>
+        <div><span class="label" style="display:inline; margin:0;">Completed</span> ${fmt(wo.completed_at) ? esc(fmt(wo.completed_at)) : "Not completed yet"}</div>
+      </div>
+
+      <div class="label">Parts used</div>
+      ${partsUsed.length > 0 ? `<div style="font-size:13px; margin-bottom:8px;">${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : `<div style="font-size:12px; color:#8A9AA8; margin-bottom:8px;">None logged yet.</div>`}
+      ${isLogging ? `
+      <div class="row" style="gap:8px; align-items:flex-end; margin-bottom:12px; padding:10px; background:#EEEDE6; border-radius:4px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:140px;">
+          <label class="label">Part</label>
+          <select id="lp-part-${wo.id}">
+            ${parts.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`).join("")}
+          </select>
+        </div>
+        <div style="width:80px;">
+          <label class="label">Qty</label>
+          <input type="number" min="1" value="1" id="lp-qty-${wo.id}" />
+        </div>
+        <button class="btn btn-dark" onclick="window.__confirmLogPart('${wo.id}')">Add</button>
+        <button class="btn" onclick="window.__toggleLogPart(null)">Cancel</button>
+      </div>` : `${parts.length > 0 ? `<button class="btn" style="margin-bottom:12px;" onclick="window.__toggleLogPart('${wo.id}')">+ Log part used</button>` : ""}`}
+
+      <div class="label">Comments</div>
+      ${comments.length > 0 ? comments.map(c => `
+        <div style="margin-bottom:8px;">
+          <div style="font-size:12px;"><strong style="font-weight:500;">${esc(c.author)}</strong> <span style="color:#8A9AA8;">${esc(fmt(c.at))}</span></div>
+          <div style="font-size:13px;">${esc(c.text)}</div>
+        </div>`).join("") : `<div style="font-size:12px; color:#8A9AA8; margin-bottom:8px;">No comments yet.</div>`}
+      <div class="row" style="gap:8px; margin-top:8px;">
+        <input id="cm-text-${wo.id}" placeholder="Add a comment" style="flex:1;" onkeydown="if(event.key==='Enter'){window.__submitComment('${wo.id}')}" />
+        <button class="btn" onclick="window.__submitComment('${wo.id}')">Post</button>
+      </div>
+    </div>`;
+
   return `
   <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:hidden; margin-bottom:10px;">
     <div style="width:6px; background:${overdue ? "#C1443C" : st.color};"></div>
     <div style="flex:1; padding:14px 16px; min-width:0;">
-      <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+      <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; cursor:pointer;" onclick="window.__toggleExpand('${wo.id}')">
         <div>
           <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(wo.id)}</div>
           <div style="font-weight:600; font-size:16px; margin-top:2px;">${esc(wo.title)}</div>
@@ -297,28 +352,15 @@ function ticketHtml(wo, asset, parts, logPartFor) {
         </div>
       </div>
       ${wo.notes ? `<div style="font-size:13px; margin-top:8px; opacity:0.8;">${esc(wo.notes)}</div>` : ""}
-      ${partsUsed.length > 0 ? `<div style="font-size:12px; color:#4C6478; margin-top:8px;"><span class="label" style="display:inline; margin:0;">Parts used</span> &nbsp;${partsUsed.map(pu => `${pu.quantity}× ${esc(pu.part_name)}`).join(", ")}</div>` : ""}
-      ${isLogging ? `
-      <div class="row" style="gap:8px; align-items:flex-end; margin-top:10px; padding:10px; background:#EEEDE6; border-radius:4px; flex-wrap:wrap;">
-        <div style="flex:1; min-width:140px;">
-          <label class="label">Part</label>
-          <select id="lp-part-${wo.id}">
-            ${parts.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`).join("")}
-          </select>
-        </div>
-        <div style="width:80px;">
-          <label class="label">Qty</label>
-          <input type="number" min="1" value="1" id="lp-qty-${wo.id}" />
-        </div>
-        <button class="btn btn-dark" onclick="window.__confirmLogPart('${wo.id}')">Add</button>
-        <button class="btn" onclick="window.__toggleLogPart(null)">Cancel</button>
-      </div>` : ""}
+      ${detail}
       <div class="row" style="justify-content:space-between; align-items:center; margin-top:10px;">
-        <div style="font-size:12px; color:${overdue ? "#C1443C" : "#8A9AA8"}; font-weight:${overdue ? 600 : 400};">
-          ${wo.status === "done" ? "Closed" : overdue ? "Overdue" : `Due ${esc(wo.due_date || "")}`}
+        <div class="row" style="gap:12px; align-items:center;">
+          <button class="btn" style="border:none; padding:0; color:#4C6478;" onclick="window.__toggleExpand('${wo.id}')">${isOpen ? "Close" : "Open"}</button>
+          <div style="font-size:12px; color:${overdue ? "#C1443C" : "#8A9AA8"}; font-weight:${overdue ? 600 : 400};">
+            ${wo.status === "done" ? "Closed" : overdue ? "Overdue" : `Due ${esc(wo.due_date || "")}`}
+          </div>
         </div>
         <div class="row" style="gap:6px;">
-          ${!isLogging && parts.length > 0 ? `<button class="btn" onclick="window.__toggleLogPart('${wo.id}')">+ Log part</button>` : ""}
           ${wo.status !== "done" ? `<button class="btn" onclick="window.__advance('${wo.id}')">${wo.status === "open" ? "Start work" : "Mark done"}</button>` : ""}
           <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__delete('${wo.id}')">Delete</button>
         </div>
@@ -512,7 +554,7 @@ function renderApp() {
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Parts to reorder</div><div style="font-size:30px; font-weight:700; color:${reorderParts.length ? "#C1443C" : "#1B222B"};">${reorderParts.length}</div></div>
       </div>
       <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Needs attention</div>
-      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
+      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
     `;
   } else if (s.tab === "work-orders") {
     main = `
@@ -525,7 +567,7 @@ function renderApp() {
         ${["all", "open", "in-progress", "done"].map(f => `<button class="btn ${s.filter === f ? "btn-active" : ""}" onclick="window.__setFilter('${f}')">${f === "all" ? "All" : STATUS[f].label}</button>`).join("")}
         <input id="wo-search" placeholder="Search" value="${esc(s.query)}" style="width:140px; margin-left:auto;" oninput="window.__setQuery(this.value)" />
       </div>
-      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
+      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
     `;
   } else if (s.tab === "assets") {
     main = `
@@ -643,6 +685,13 @@ window.__confirmLogPart = (orderId) => {
   const qty = parseInt(document.getElementById(`lp-qty-${orderId}`).value, 10) || 0;
   if (qty <= 0) return;
   logPartUsage(orderId, partId, qty);
+};
+window.__toggleExpand = (orderId) => { state.expandedOrder = state.expandedOrder === orderId ? null : orderId; state.logPartFor = null; render(); };
+window.__submitComment = (orderId) => {
+  const input = document.getElementById(`cm-text-${orderId}`);
+  const text = input.value;
+  if (!text.trim()) return;
+  addComment(orderId, text);
 };
 window.__advance = (id) => advanceOrder(id);
 window.__delete = (id) => deleteOrder(id);
