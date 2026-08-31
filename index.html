@@ -85,6 +85,7 @@ let state = {
   expandedPart: null,
   showChangePin: false,
   showLogBreakdown: false,
+  historyAssetFilter: "all",
   err: "",
 };
 
@@ -529,6 +530,30 @@ async function exportHistoryXlsx() {
   a.download = `depot-work-order-history-${new Date().toISOString().slice(0, 10)}.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function workOrdersPerMachineHtml(orders, assets) {
+  const counts = {};
+  orders.forEach(wo => { if (wo.asset_id) counts[wo.asset_id] = (counts[wo.asset_id] || 0) + 1; });
+  const ranked = Object.entries(counts)
+    .map(([assetId, count]) => ({
+      asset: assets.find(a => a.id === assetId),
+      count,
+      open: orders.filter(o => o.asset_id === assetId && o.status !== "done").length,
+    }))
+    .filter(r => r.asset)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+  if (ranked.length === 0) return `<div style="font-size:13px; color:#8A9AA8; margin-bottom:16px;">No work orders logged yet.</div>`;
+  return `
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Work orders per machine</div>
+    ${ranked.map(r => `
+      <div class="row" style="justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #D8D5C9; cursor:pointer;" onclick="window.__setHistoryAssetFilter('${esc(r.asset.id)}')">
+        <span style="font-size:13px;">${esc(r.asset.name)}</span>
+        <span style="font-size:13px;"><strong style="font-weight:600;">${r.count}</strong> total${r.open > 0 ? ` &middot; <span style="color:#C1443C;">${r.open} open</span>` : ""}</span>
+      </div>`).join("")}
+  </div>`;
 }
 
 function breakdownSummaryHtml(breakdowns, assets) {
@@ -1326,9 +1351,17 @@ function renderApp() {
         ${[...s.breakdowns].sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at)).slice(0, 10).map(bd => breakdownRowHtml(bd, s.assets.find(a => a.id === bd.asset_id), canManageBreakdowns)).join("")}
       </div>
 
-      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px; gap:12px; flex-wrap:wrap;">
         <div style="font-weight:700; font-size:22px;">Work order history</div>
         <button class="btn btn-dark" onclick="window.__exportHistory()">Export to Excel${selectedCount > 0 ? ` (${selectedCount} selected)` : " (all)"}</button>
+      </div>
+      ${workOrdersPerMachineHtml(s.orders, s.assets)}
+      <div style="margin-bottom:14px; max-width:280px;">
+        <label class="label">Filter by machine</label>
+        <select onchange="window.__setHistoryAssetFilter(this.value)">
+          <option value="all" ${s.historyAssetFilter === "all" ? "selected" : ""}>All machines</option>
+          ${s.assets.map(a => `<option value="${esc(a.id)}" ${s.historyAssetFilter === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select>
       </div>
       <div class="card" style="overflow-x:auto; padding:0;">
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
@@ -1347,7 +1380,7 @@ function renderApp() {
             </tr>
           </thead>
           <tbody>
-            ${[...s.orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="10" style="padding:16px; color:#8A9AA8;">No work orders yet.</td></tr>`}
+            ${[...s.orders].filter(wo => s.historyAssetFilter === "all" || wo.asset_id === s.historyAssetFilter).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="10" style="padding:16px; color:#8A9AA8;">No work orders match.</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -1482,6 +1515,7 @@ window.__submitAddAsset = () => {
 window.__deleteAsset = (id) => deleteAsset(id);
 window.__setStatusOverride = (id, value) => setAssetStatusOverride(id, value);
 window.__toggleLogBreakdown = (v) => { state.showLogBreakdown = v; state.err = ""; render(); };
+window.__setHistoryAssetFilter = (val) => { state.historyAssetFilter = val; render(); };
 window.__submitBreakdown = () => {
   const assetId = document.getElementById("bd-asset").value;
   const occurredLocal = document.getElementById("bd-occurred").value;
