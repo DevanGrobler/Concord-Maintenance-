@@ -82,6 +82,7 @@ let state = {
   reorderPopupDismissedIds: [],
   partsAssetFilter: "all",
   expandedPart: null,
+  showChangePin: false,
   err: "",
 };
 
@@ -89,6 +90,7 @@ function uid(prefix) { return `${prefix}-${Math.floor(1000 + Math.random() * 900
 function daysUntil(d) { if (!d) return 999; return Math.ceil((new Date(d) - new Date()) / 86400000); }
 function esc(s) { return (s || "").toString().replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function fmt(iso) { if (!iso) return null; return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+function can(user, perm) { return !!user && (user.is_admin || !!user[perm]); }
 function addDays(dateStr, days) { const d = new Date(dateStr); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); }
 function inspectionStatus(a) {
   if (!a.inspection_interval_days) return { label: "Not scheduled", color: "#8A9AA8", deep: "#4C6478", overdue: false, dueDate: null };
@@ -166,7 +168,7 @@ async function createAdmin(username, pin) {
 
 function login(username, pin) {
   state.err = "";
-  const member = state.team.find(m => m.username === username && m.pin === pin);
+  const member = state.team.find(m => m.username.toLowerCase() === username.toLowerCase() && m.pin === pin);
   if (!member) { state.err = "That name and PIN don't match."; render(); return; }
   state.currentUser = member;
   localStorage.setItem("depot-user-id", member.id);
@@ -179,12 +181,15 @@ function logout() {
   render();
 }
 
-async function addMember(username, pin, isAdmin) {
+async function addMember(username, pin, isAdmin, perms) {
   state.err = "";
   if (state.team.some(m => m.username.toLowerCase() === username.toLowerCase())) {
     state.err = "That name is already on the team."; render(); return;
   }
-  const { error } = await supabase.from("team_members").insert({ id: uid("U"), username, pin, is_admin: isAdmin });
+  const { error } = await supabase.from("team_members").insert({
+    id: uid("U"), username, pin, is_admin: isAdmin,
+    can_manage_assets: perms.assets, can_manage_parts: perms.parts, can_delete_work_orders: perms.deleteOrders,
+  });
   if (error) { state.err = error.message; render(); return; }
   state.showAddMember = false;
   await loadTeam();
@@ -195,6 +200,29 @@ async function removeMember(id) {
   const { error } = await supabase.from("team_members").delete().eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadTeam();
+  render();
+}
+async function savePermissions(id, isAdmin, perms) {
+  const { error } = await supabase.from("team_members").update({
+    is_admin: isAdmin, can_manage_assets: perms.assets, can_manage_parts: perms.parts, can_delete_work_orders: perms.deleteOrders,
+  }).eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadTeam();
+  render();
+}
+async function changePin(newPin) {
+  state.err = "";
+  const { error } = await supabase.from("team_members").update({ pin: newPin }).eq("id", state.currentUser.id);
+  if (error) { state.err = error.message; render(); return; }
+  state.currentUser = { ...state.currentUser, pin: newPin };
+  state.showChangePin = false;
+  await loadTeam();
+  render();
+}
+async function deleteAsset(id) {
+  const { error } = await supabase.from("assets").delete().eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
   render();
 }
 
@@ -472,6 +500,26 @@ function historyRowHtml(wo, asset) {
   </tr>`;
 }
 
+function changePinPopupHtml(err) {
+  return `
+  <div style="position:fixed; inset:0; background:rgba(27,34,43,0.5); z-index:60; display:flex; align-items:center; justify-content:center; padding:24px;" class="no-print">
+    <div style="background:#fff; max-width:340px; width:100%; border-radius:8px; padding:24px;">
+      <div style="font-weight:700; font-size:18px; margin-bottom:14px;">Change PIN</div>
+      <label class="label">Current PIN</label>
+      <input id="cp-current" type="password" inputmode="numeric" maxlength="4" style="margin-bottom:10px;" placeholder="••••" />
+      <label class="label">New PIN</label>
+      <input id="cp-new" type="password" inputmode="numeric" maxlength="4" style="margin-bottom:10px;" placeholder="••••" />
+      <label class="label">Confirm new PIN</label>
+      <input id="cp-confirm" type="password" inputmode="numeric" maxlength="4" style="margin-bottom:14px;" placeholder="••••" />
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="row" style="gap:8px; justify-content:flex-end;">
+        <button class="btn" onclick="window.__toggleChangePin(false)">Cancel</button>
+        <button class="btn btn-dark" onclick="window.__submitChangePin()">Save new PIN</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function reorderPopupHtml(parts) {
   return `
   <div style="position:fixed; inset:0; background:rgba(27,34,43,0.5); z-index:60; display:flex; align-items:center; justify-content:center; padding:24px;" class="no-print">
@@ -672,7 +720,7 @@ function tagHtml(label, color, deep) {
   return `<span class="tag" style="color:${deep}; background:${color}26; border:1px solid ${color}66;">${esc(label)}</span>`;
 }
 
-function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
+function ticketHtml(wo, asset, parts, logPartFor, expandedOrder, canDeleteOrders) {
   const st = STATUS[wo.status];
   const pr = PRIORITY[wo.priority];
   const overdue = wo.status !== "done" && daysUntil(wo.due_date) < 0;
@@ -773,7 +821,7 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
         </div>
         <div class="row" style="gap:6px;">
           ${wo.status !== "done" ? `<button class="btn" onclick="window.__advance('${wo.id}')">${wo.status === "open" ? "Start work" : "Mark done"}</button>` : ""}
-          <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__delete('${wo.id}')">Delete</button>
+          ${canDeleteOrders ? `<button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__delete('${wo.id}')">Delete</button>` : ""}
         </div>
       </div>
     </div>
@@ -805,7 +853,7 @@ function addAssetFormHtml() {
   </div>`;
 }
 
-function assetHtml(asset, openCount) {
+function assetHtml(asset, openCount, canManageAssets) {
   const st = ASSET_STATUS[asset.status];
   return `
   <div class="card" style="position:relative; overflow:visible;">
@@ -827,6 +875,7 @@ function assetHtml(asset, openCount) {
       <div style="font-size:11px; color:#8A9AA8;">${openCount > 0 ? `${openCount} open order${openCount > 1 ? "s" : ""}` : "No open orders"}</div>
     </div>
     <div style="font-size:11px; color:#8A9AA8; margin-top:6px;">Last serviced ${esc(asset.last_serviced || "—")}</div>
+    ${canManageAssets ? `<button class="btn" style="margin-top:10px; color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteAsset('${esc(asset.id)}')">Delete asset</button>` : ""}
   </div>`;
 }
 
@@ -872,13 +921,23 @@ function formHtml() {
 }
 
 function teamMemberRow(m) {
+  const isYou = m.id === state.currentUser.id;
   return `
-  <div class="row" style="justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #D8D5C9;">
-    <div>
-      <div style="font-weight:500; font-size:14px;">${esc(m.username)} ${m.id === state.currentUser.id ? "<span style='color:#8A9AA8; font-size:11px;'>(you)</span>" : ""}</div>
-      <div style="font-size:11px; color:#8A9AA8;">${m.is_admin ? "Admin" : "Team member"}</div>
+  <div style="padding:12px 0; border-bottom:1px solid #D8D5C9;">
+    <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div>
+        <div style="font-weight:500; font-size:14px;">${esc(m.username)} ${isYou ? "<span style='color:#8A9AA8; font-size:11px;'>(you)</span>" : ""}</div>
+        <div style="font-size:11px; color:#8A9AA8;">${m.is_admin ? "Admin — can do everything" : "Team member"}</div>
+      </div>
+      ${!isYou ? `<button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__removeMember('${m.id}')">Remove</button>` : ""}
     </div>
-    ${m.id !== state.currentUser.id ? `<button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__removeMember('${m.id}')">Remove</button>` : ""}
+    <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:8px;">
+      <label style="display:flex; align-items:center; gap:5px; font-size:12px;"><input type="checkbox" id="perm-admin-${m.id}" style="width:auto;" ${m.is_admin ? "checked" : ""} ${isYou ? "disabled" : ""} /> Admin</label>
+      <label style="display:flex; align-items:center; gap:5px; font-size:12px;"><input type="checkbox" id="perm-assets-${m.id}" style="width:auto;" ${m.can_manage_assets ? "checked" : ""} /> Add/remove assets</label>
+      <label style="display:flex; align-items:center; gap:5px; font-size:12px;"><input type="checkbox" id="perm-parts-${m.id}" style="width:auto;" ${m.can_manage_parts ? "checked" : ""} /> Add/remove parts</label>
+      <label style="display:flex; align-items:center; gap:5px; font-size:12px;"><input type="checkbox" id="perm-delwo-${m.id}" style="width:auto;" ${m.can_delete_work_orders ? "checked" : ""} /> Delete work orders</label>
+    </div>
+    <button class="btn" onclick="window.__savePermissions('${m.id}')">Save permissions</button>
   </div>`;
 }
 
@@ -894,9 +953,17 @@ function addMemberFormHtml() {
       <label class="label">4-digit PIN</label>
       <input id="am-pin" type="password" inputmode="numeric" maxlength="4" placeholder="••••" />
     </div>
-    <div style="margin-bottom:14px; display:flex; align-items:center; gap:8px;">
+    <div style="margin-bottom:8px; display:flex; align-items:center; gap:8px;">
       <input id="am-admin" type="checkbox" style="width:auto;" />
-      <label for="am-admin" style="font-size:13px;">Make this person an admin too</label>
+      <label for="am-admin" style="font-size:13px;">Make this person an admin (can do everything)</label>
+    </div>
+    <div style="margin-bottom:14px; padding-left:2px;">
+      <div style="font-size:11px; color:#8A9AA8; margin-bottom:6px;">Or grant specific permissions instead:</div>
+      <div style="display:flex; gap:14px; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:5px; font-size:13px;"><input id="am-perm-assets" type="checkbox" style="width:auto;" /> Add/remove assets</label>
+        <label style="display:flex; align-items:center; gap:5px; font-size:13px;"><input id="am-perm-parts" type="checkbox" style="width:auto;" /> Add/remove parts</label>
+        <label style="display:flex; align-items:center; gap:5px; font-size:13px;"><input id="am-perm-delwo" type="checkbox" style="width:auto;" /> Delete work orders</label>
+      </div>
     </div>
     <div class="row" style="gap:8px;">
       <button class="btn btn-dark" onclick="window.__submitAddMember()">Add teammate</button>
@@ -905,7 +972,7 @@ function addMemberFormHtml() {
   </div>`;
 }
 
-function partHtml(p, assets, isExpanded) {
+function partHtml(p, assets, isExpanded, canManageParts) {
   const needsReorder = p.stock_on_hand <= p.buffer_stock;
   const linkedAsset = assets.find(a => a.id === p.asset_id);
 
@@ -914,30 +981,31 @@ function partHtml(p, assets, isExpanded) {
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
         <div>
           <label class="label">Stock on hand</label>
-          <input type="number" min="0" id="pt-stock-${esc(p.id)}" value="${p.stock_on_hand}" />
+          <input type="number" min="0" id="pt-stock-${esc(p.id)}" value="${p.stock_on_hand}" ${canManageParts ? "" : "disabled"} />
         </div>
         <div>
           <label class="label">Buffer stock</label>
-          <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
+          <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" ${canManageParts ? "" : "disabled"} />
         </div>
       </div>
       <div style="margin-bottom:8px;">
         <label class="label">Allocated to asset</label>
-        <select id="pt-asset-${esc(p.id)}">
+        <select id="pt-asset-${esc(p.id)}" ${canManageParts ? "" : "disabled"}>
           <option value="">General stock (not asset-specific)</option>
           ${assets.map(a => `<option value="${esc(a.id)}" ${p.asset_id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
         </select>
       </div>
       <div style="margin-bottom:10px;">
         <label class="label">Supplier</label>
-        <input id="pt-supname-${esc(p.id)}" value="${esc(p.supplier_name || "")}" placeholder="Supplier name" style="margin-bottom:6px;" />
-        <input id="pt-supcontact-${esc(p.id)}" value="${esc(p.supplier_contact || "")}" placeholder="Phone or email" style="margin-bottom:6px;" />
-        <input id="pt-supsku-${esc(p.id)}" value="${esc(p.supplier_sku || "")}" placeholder="Supplier part / SKU number" />
+        <input id="pt-supname-${esc(p.id)}" value="${esc(p.supplier_name || "")}" placeholder="Supplier name" style="margin-bottom:6px;" ${canManageParts ? "" : "disabled"} />
+        <input id="pt-supcontact-${esc(p.id)}" value="${esc(p.supplier_contact || "")}" placeholder="Phone or email" style="margin-bottom:6px;" ${canManageParts ? "" : "disabled"} />
+        <input id="pt-supsku-${esc(p.id)}" value="${esc(p.supplier_sku || "")}" placeholder="Supplier part / SKU number" ${canManageParts ? "" : "disabled"} />
       </div>
+      ${canManageParts ? `
       <div class="row" style="gap:6px;">
         <button class="btn btn-dark" onclick="window.__savePart('${p.id}')">Save</button>
         <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deletePart('${p.id}')">Delete</button>
-      </div>
+      </div>` : `<div style="font-size:11px; color:#8A9AA8;">You don't have permission to edit parts.</div>`}
     </div>`;
 
   return `
@@ -1060,7 +1128,7 @@ function renderApp() {
         <div class="card" style="flex:1; min-width:130px;"><div style="font-size:12px; color:#4C6478; margin-bottom:6px;">Inspections overdue</div><div style="font-size:30px; font-weight:700; color:${overdueInspections.length ? "#C1443C" : "#1B222B"};">${overdueInspections.length}</div></div>
       </div>
       <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Needs attention</div>
-      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
+      ${[...overdueOrders, ...openOrders.filter(o => !overdueOrders.includes(o))].slice(0, 5).map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder, can(s.currentUser, "can_delete_work_orders"))).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">Nothing open. Everything's on track.</div>`}
     `;
   } else if (s.tab === "work-orders") {
     main = `
@@ -1073,20 +1141,22 @@ function renderApp() {
         ${["all", "open", "in-progress", "done"].map(f => `<button class="btn ${s.filter === f ? "btn-active" : ""}" onclick="window.__setFilter('${f}')">${f === "all" ? "All" : STATUS[f].label}</button>`).join("")}
         <input id="wo-search" placeholder="Search" value="${esc(s.query)}" style="width:140px; margin-left:auto;" oninput="window.__setQuery(this.value)" />
       </div>
-      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder)).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
+      ${filtered.map(wo => ticketHtml(wo, s.assets.find(a => a.id === wo.asset_id), s.parts, s.logPartFor, s.expandedOrder, can(s.currentUser, "can_delete_work_orders"))).join("") || `<div style="color:#8A9AA8; font-size:13px; padding:20px 0;">No work orders match.</div>`}
     `;
   } else if (s.tab === "assets") {
+    const canManageAssets = can(s.currentUser, "can_manage_assets");
     main = `
       <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
         <div style="font-weight:700; font-size:22px;">Assets</div>
-        ${!s.showAddAsset ? `<button class="btn btn-dark" onclick="window.__toggleAddAsset(true)">+ Add asset</button>` : ""}
+        ${canManageAssets && !s.showAddAsset ? `<button class="btn btn-dark" onclick="window.__toggleAddAsset(true)">+ Add asset</button>` : ""}
       </div>
       ${s.showAddAsset ? addAssetFormHtml() : ""}
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
-        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets added yet.</div>`}
+        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length, canManageAssets)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets added yet.</div>`}
       </div>
     `;
   } else if (s.tab === "parts") {
+    const canManageParts = can(s.currentUser, "can_manage_parts");
     let filteredParts = s.parts;
     if (s.partsAssetFilter === "general") filteredParts = filteredParts.filter(p => !p.asset_id);
     else if (s.partsAssetFilter !== "all") filteredParts = filteredParts.filter(p => p.asset_id === s.partsAssetFilter);
@@ -1094,7 +1164,7 @@ function renderApp() {
     main = `
       <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px; gap:12px; flex-wrap:wrap;">
         <div style="font-weight:700; font-size:22px;">Parts</div>
-        ${!s.showAddPart ? `<button class="btn btn-dark" onclick="window.__toggleAddPart(true)">+ Add part</button>` : ""}
+        ${canManageParts && !s.showAddPart ? `<button class="btn btn-dark" onclick="window.__toggleAddPart(true)">+ Add part</button>` : ""}
       </div>
       ${s.showAddPart ? addPartFormHtml(s.assets) : ""}
       ${reorderParts.length > 0 ? `<div class="err" style="background:#E3A73B18; border-color:#E3A73B55; color:#8C5E12;">${reorderParts.length} part${reorderParts.length > 1 ? "s are" : " is"} at or below buffer stock and may need reordering.</div>` : ""}
@@ -1107,7 +1177,7 @@ function renderApp() {
         </select>
       </div>
       <div style="display:flex; flex-direction:column;">
-        ${filteredParts.map(p => partHtml(p, s.assets, s.expandedPart === p.id)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts match this filter.</div>`}
+        ${filteredParts.map(p => partHtml(p, s.assets, s.expandedPart === p.id, canManageParts)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts match this filter.</div>`}
       </div>
     `;
   } else if (s.tab === "history") {
@@ -1177,7 +1247,10 @@ function renderApp() {
       ${s.currentUser.is_admin ? nav("team", "Team") : ""}
       <div style="margin-top:auto; padding-top:16px; border-top:1px solid #D8D5C9;">
         <div style="font-size:13px; font-weight:500;">${esc(s.currentUser.username)} ${s.currentUser.is_admin ? "<span style='color:#8A9AA8; font-size:11px;'>(admin)</span>" : ""}</div>
-        <button class="btn" style="margin-top:6px; padding:4px 8px; font-size:11px;" onclick="window.__signOut()">Sign out</button>
+        <div class="row" style="gap:10px; margin-top:6px;">
+          <button class="btn" style="padding:4px 8px; font-size:11px;" onclick="window.__toggleChangePin(true)">Change PIN</button>
+          <button class="btn" style="padding:4px 8px; font-size:11px;" onclick="window.__signOut()">Sign out</button>
+        </div>
       </div>
     </div>
     <div style="flex:1; padding:24px 28px; min-width:0;">
@@ -1188,7 +1261,8 @@ function renderApp() {
   ${(() => {
     const undismissed = reorderParts.filter(p => !s.reorderPopupDismissedIds.includes(p.id));
     return undismissed.length > 0 ? reorderPopupHtml(undismissed) : "";
-  })()}`;
+  })()}
+  ${s.showChangePin ? changePinPopupHtml(s.err) : ""}`;
 }
 
 function render() {
@@ -1224,11 +1298,35 @@ window.__submitAddMember = () => {
   const username = document.getElementById("am-username").value.trim();
   const pin = document.getElementById("am-pin").value;
   const isAdmin = document.getElementById("am-admin").checked;
+  const perms = {
+    assets: document.getElementById("am-perm-assets").checked,
+    parts: document.getElementById("am-perm-parts").checked,
+    deleteOrders: document.getElementById("am-perm-delwo").checked,
+  };
   if (!username) { state.err = "Enter a name."; render(); return; }
   if (!/^\d{4}$/.test(pin)) { state.err = "PIN needs to be 4 digits."; render(); return; }
-  addMember(username, pin, isAdmin);
+  addMember(username, pin, isAdmin, perms);
 };
 window.__removeMember = (id) => removeMember(id);
+window.__savePermissions = (id) => {
+  const isAdmin = document.getElementById(`perm-admin-${id}`).checked;
+  const perms = {
+    assets: document.getElementById(`perm-assets-${id}`).checked,
+    parts: document.getElementById(`perm-parts-${id}`).checked,
+    deleteOrders: document.getElementById(`perm-delwo-${id}`).checked,
+  };
+  savePermissions(id, isAdmin, perms);
+};
+window.__toggleChangePin = (v) => { state.showChangePin = v; state.err = ""; render(); };
+window.__submitChangePin = () => {
+  const current = document.getElementById("cp-current").value;
+  const next = document.getElementById("cp-new").value;
+  const confirm = document.getElementById("cp-confirm").value;
+  if (current !== state.currentUser.pin) { state.err = "Current PIN is incorrect."; render(); return; }
+  if (!/^\d{4}$/.test(next)) { state.err = "New PIN needs to be 4 digits."; render(); return; }
+  if (next !== confirm) { state.err = "New PIN and confirmation don't match."; render(); return; }
+  changePin(next);
+};
 window.__toggleAddPart = (v) => { state.showAddPart = v; state.err = ""; render(); };
 window.__toggleAddAsset = (v) => { state.showAddAsset = v; state.err = ""; render(); };
 window.__submitAddAsset = () => {
