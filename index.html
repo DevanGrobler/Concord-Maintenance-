@@ -263,7 +263,7 @@ async function advanceOrder(id) {
   const next = cur.status === "open" ? "in-progress" : "done";
   const patch = { status: next };
   if (next === "in-progress") patch.started_at = new Date().toISOString();
-  if (next === "done") patch.completed_at = new Date().toISOString();
+  if (next === "done") { patch.completed_at = new Date().toISOString(); patch.completed_by = state.currentUser.username; }
   const { error } = await supabase.from("work_orders").update(patch).eq("id", id);
   if (error) { state.err = error.message; render(); } else { await loadData(); render(); }
 }
@@ -465,6 +465,7 @@ async function exportHistoryXlsx() {
     { header: "Created", key: "created", width: 20 },
     { header: "Started", key: "started", width: 20 },
     { header: "Completed", key: "completed", width: 20 },
+    { header: "Closed by", key: "closedBy", width: 16 },
     { header: "Parts used", key: "parts", width: 30 },
     { header: "Photo", key: "photo", width: 14 },
   ];
@@ -475,7 +476,7 @@ async function exportHistoryXlsx() {
     const row = ws.addRow({
       id: wo.id, title: wo.title, asset: asset ? asset.name : "", status: wo.status, priority: wo.priority,
       assigned: wo.assigned_to, logged: wo.created_by, created: wo.created_at || "", started: wo.started_at || "",
-      completed: wo.completed_at || "", parts,
+      completed: wo.completed_at || "", closedBy: wo.completed_by || "", parts,
     });
     row.height = 56;
     const photos = wo.photos || [];
@@ -486,7 +487,7 @@ async function exportHistoryXlsx() {
         const ext = (photos[0].url.split(".").pop() || "png").toLowerCase().split("?")[0];
         const safeExt = ["png", "jpg", "jpeg", "gif"].includes(ext) ? (ext === "jpg" ? "jpeg" : ext) : "png";
         const imgId = wb.addImage({ buffer: buf, extension: safeExt });
-        ws.addImage(imgId, { tl: { col: 11, row: row.number - 1 }, ext: { width: 70, height: 70 } });
+        ws.addImage(imgId, { tl: { col: 12, row: row.number - 1 }, ext: { width: 70, height: 70 } });
       } catch (e) { /* skip photo if it can't be fetched */ }
     }
   }
@@ -538,6 +539,7 @@ function historyRowHtml(wo, asset) {
     <td style="padding:8px 10px; color:#4C6478;">${esc(wo.assigned_to)}</td>
     <td style="padding:8px 10px; color:#8A9AA8; font-size:12px;">${esc(fmt(wo.created_at)) || ""}</td>
     <td style="padding:8px 10px; color:#8A9AA8; font-size:12px;">${esc(fmt(wo.completed_at)) || "—"}</td>
+    <td style="padding:8px 10px; color:#4C6478; font-size:12px;">${esc(wo.completed_by) || "—"}</td>
     <td style="padding:8px 10px;">
       ${photos.length > 0
         ? `<div class="row" style="gap:4px;">${photos.slice(0, 3).map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.url)}" style="width:28px; height:28px; object-fit:cover; border-radius:3px; border:1px solid #D8D5C9;" /></a>`).join("")}${photos.length > 3 ? `<span style="font-size:11px; color:#8A9AA8; align-self:center;">+${photos.length - 3}</span>` : ""}</div>`
@@ -615,7 +617,7 @@ function jobCardHtml(wo, asset, parts) {
         <div class="row" style="gap:24px; flex-wrap:wrap; font-size:13px; margin-top:12px;">
           <div><span class="label" style="display:inline; margin:0;">Created</span> ${esc(fmt(wo.created_at)) || "—"}</div>
           <div><span class="label" style="display:inline; margin:0;">Started</span> ${esc(fmt(wo.started_at)) || "—"}</div>
-          <div><span class="label" style="display:inline; margin:0;">Completed</span> ${esc(fmt(wo.completed_at)) || "—"}</div>
+          <div><span class="label" style="display:inline; margin:0;">Completed</span> ${esc(fmt(wo.completed_at)) || "—"}${wo.completed_by ? ` by ${esc(wo.completed_by)}` : ""}</div>
         </div>
         ${wo.notes ? `<div style="margin-top:16px;"><div class="label">Notes</div><div style="font-size:13px;">${esc(wo.notes)}</div></div>` : ""}
         <div style="margin-top:16px;">
@@ -780,7 +782,7 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder, canDeleteOrders
     <div style="border-top:1px solid #D8D5C9; margin-top:12px; padding-top:12px;">
       <div class="row" style="gap:18px; flex-wrap:wrap; font-size:12px; color:#4C6478; margin-bottom:12px;">
         <div><span class="label" style="display:inline; margin:0;">Started</span> ${fmt(wo.started_at) ? esc(fmt(wo.started_at)) : "Not started yet"}</div>
-        <div><span class="label" style="display:inline; margin:0;">Completed</span> ${fmt(wo.completed_at) ? esc(fmt(wo.completed_at)) : "Not completed yet"}</div>
+        <div><span class="label" style="display:inline; margin:0;">Completed</span> ${fmt(wo.completed_at) ? `${esc(fmt(wo.completed_at))}${wo.completed_by ? ` by ${esc(wo.completed_by)}` : ""}` : "Not completed yet"}</div>
       </div>
 
       <div class="label">Parts used</div>
@@ -1267,12 +1269,13 @@ function renderApp() {
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Assigned</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Created</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Completed</th>
+              <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Closed by</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;">Photos</th>
               <th style="padding:8px 10px; font-size:11px; color:#4C6478; text-transform:uppercase;"></th>
             </tr>
           </thead>
           <tbody>
-            ${[...s.orders].filter(wo => s.historyAssetFilter === "all" || wo.asset_id === s.historyAssetFilter).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="10" style="padding:16px; color:#8A9AA8;">No work orders match.</td></tr>`}
+            ${[...s.orders].filter(wo => s.historyAssetFilter === "all" || wo.asset_id === s.historyAssetFilter).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(wo => historyRowHtml(wo, s.assets.find(a => a.id === wo.asset_id))).join("") || `<tr><td colspan="11" style="padding:16px; color:#8A9AA8;">No work orders match.</td></tr>`}
           </tbody>
         </table>
       </div>
