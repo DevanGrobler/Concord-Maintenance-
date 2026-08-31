@@ -79,6 +79,8 @@ let state = {
   loggingInspectionFor: null,
   inspectionHistoryFor: null,
   reorderPopupDismissedIds: [],
+  partsAssetFilter: "all",
+  expandedPart: null,
   err: "",
 };
 
@@ -866,54 +868,65 @@ function addMemberFormHtml() {
   </div>`;
 }
 
-function partHtml(p, assets) {
+function partHtml(p, assets, isExpanded) {
   const needsReorder = p.stock_on_hand <= p.buffer_stock;
   const linkedAsset = assets.find(a => a.id === p.asset_id);
-  return `
-  <div class="card" style="position:relative; overflow:visible;">
-    <div class="row" style="gap:10px; align-items:flex-start;">
-      <div>
-        <input type="file" accept="image/*" id="pp-file-${esc(p.id)}" style="display:none;" onchange="window.__uploadPartPhoto('${esc(p.id)}')" />
-        ${p.photo_url
-          ? `<img src="${esc(p.photo_url)}" class="part-photo" title="Click to change photo" onclick="document.getElementById('pp-file-${esc(p.id)}').click()" />`
-          : `<div class="part-photo" style="display:flex; align-items:center; justify-content:center; background:#EEEDE6; color:#8A9AA8; font-size:9px; text-align:center; padding:2px;" onclick="document.getElementById('pp-file-${esc(p.id)}').click()">+ Photo</div>`}
+
+  const detail = !isExpanded ? "" : `
+    <div style="border-top:1px solid #D8D5C9; margin-top:10px; padding-top:10px;">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+        <div>
+          <label class="label">Stock on hand</label>
+          <input type="number" min="0" id="pt-stock-${esc(p.id)}" value="${p.stock_on_hand}" />
+        </div>
+        <div>
+          <label class="label">Buffer stock</label>
+          <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
+        </div>
       </div>
-      <div style="flex:1; min-width:0;">
-        <div style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(p.id)}</div>
-        <div style="font-weight:600; font-size:16px; margin-top:3px;">${esc(p.name)}</div>
-        <div style="font-size:12px; color:#4C6478; margin-top:4px;">${esc(p.category || "")} &middot; unit: ${esc(p.unit)}</div>
-        ${linkedAsset ? `<div style="font-size:11px; color:#8C5E12; margin-top:2px;">For: ${esc(linkedAsset.name)}</div>` : ""}
+      <div style="margin-bottom:8px;">
+        <label class="label">Allocated to asset</label>
+        <select id="pt-asset-${esc(p.id)}">
+          <option value="">General stock (not asset-specific)</option>
+          ${assets.map(a => `<option value="${esc(a.id)}" ${p.asset_id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select>
       </div>
-    </div>
-    <div style="margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-      <div>
-        <label class="label">Stock on hand</label>
-        <input type="number" min="0" id="pt-stock-${esc(p.id)}" value="${p.stock_on_hand}" />
+      <div style="margin-bottom:10px;">
+        <label class="label">Supplier</label>
+        <input id="pt-supname-${esc(p.id)}" value="${esc(p.supplier_name || "")}" placeholder="Supplier name" style="margin-bottom:6px;" />
+        <input id="pt-supcontact-${esc(p.id)}" value="${esc(p.supplier_contact || "")}" placeholder="Phone or email" style="margin-bottom:6px;" />
+        <input id="pt-supsku-${esc(p.id)}" value="${esc(p.supplier_sku || "")}" placeholder="Supplier part / SKU number" />
       </div>
-      <div>
-        <label class="label">Buffer stock</label>
-        <input type="number" min="0" id="pt-buffer-${esc(p.id)}" value="${p.buffer_stock}" />
-      </div>
-    </div>
-    <div style="margin-top:8px;">
-      <label class="label">Allocated to asset</label>
-      <select id="pt-asset-${esc(p.id)}">
-        <option value="">General stock (not asset-specific)</option>
-        ${assets.map(a => `<option value="${esc(a.id)}" ${p.asset_id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
-      </select>
-    </div>
-    <div style="margin-top:8px;">
-      <label class="label">Supplier</label>
-      <input id="pt-supname-${esc(p.id)}" value="${esc(p.supplier_name || "")}" placeholder="Supplier name" style="margin-bottom:6px;" />
-      <input id="pt-supcontact-${esc(p.id)}" value="${esc(p.supplier_contact || "")}" placeholder="Phone or email" style="margin-bottom:6px;" />
-      <input id="pt-supsku-${esc(p.id)}" value="${esc(p.supplier_sku || "")}" placeholder="Supplier part / SKU number" />
-    </div>
-    <div style="border-top:1px dashed #D8D5C9; margin-top:12px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
-      ${needsReorder ? tagHtml("Reorder needed", "#C1443C", "#7A241F") : tagHtml("Stock OK", "#3F8354", "#204F30")}
       <div class="row" style="gap:6px;">
-        <button class="btn" onclick="window.__savePart('${p.id}')">Save</button>
+        <button class="btn btn-dark" onclick="window.__savePart('${p.id}')">Save</button>
         <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deletePart('${p.id}')">Delete</button>
       </div>
+    </div>`;
+
+  return `
+  <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:visible; margin-bottom:8px;">
+    <div style="width:6px; background:${needsReorder ? "#C1443C" : "#3F8354"}; flex-shrink:0; border-radius:4px 0 0 4px;"></div>
+    <div style="flex:1; padding:10px 14px; min-width:0;">
+      <div class="row" style="align-items:center; gap:12px; cursor:pointer;" onclick="window.__toggleExpandPart('${p.id}')">
+        <input type="file" accept="image/*" id="pp-file-${esc(p.id)}" style="display:none;" onchange="window.__uploadPartPhoto('${esc(p.id)}')" />
+        ${p.photo_url
+          ? `<img src="${esc(p.photo_url)}" class="part-photo" style="width:36px; height:36px;" title="Click to change photo" onclick="event.stopPropagation(); document.getElementById('pp-file-${esc(p.id)}').click()" />`
+          : `<div class="part-photo" style="width:36px; height:36px; display:flex; align-items:center; justify-content:center; background:#EEEDE6; color:#8A9AA8; font-size:8px; text-align:center;" onclick="event.stopPropagation(); document.getElementById('pp-file-${esc(p.id)}').click()">+ Photo</div>`}
+        <div style="flex:1; min-width:0;">
+          <div class="row" style="gap:8px; align-items:baseline; flex-wrap:wrap;">
+            <span style="font-family:monospace; font-size:11px; color:#8A9AA8; font-weight:600;">${esc(p.id)}</span>
+            <span style="font-weight:600; font-size:14px;">${esc(p.name)}</span>
+            ${linkedAsset ? `<span style="font-size:11px; color:#8C5E12;">for ${esc(linkedAsset.name)}</span>` : ""}
+          </div>
+          <div style="font-size:12px; color:#4C6478;">${esc(p.category || "")} &middot; unit: ${esc(p.unit)}</div>
+        </div>
+        <div style="text-align:right; flex-shrink:0;">
+          <div style="font-size:13px; font-weight:600; color:${needsReorder ? "#C1443C" : "#1B222B"};">${p.stock_on_hand} / ${p.buffer_stock}</div>
+          <div style="font-size:10px; color:#8A9AA8;">on hand / buffer</div>
+        </div>
+        ${needsReorder ? tagHtml("Reorder", "#C1443C", "#7A241F") : tagHtml("OK", "#3F8354", "#204F30")}
+      </div>
+      ${detail}
     </div>
   </div>`;
 }
@@ -1033,15 +1046,27 @@ function renderApp() {
       </div>
     `;
   } else if (s.tab === "parts") {
+    let filteredParts = s.parts;
+    if (s.partsAssetFilter === "general") filteredParts = filteredParts.filter(p => !p.asset_id);
+    else if (s.partsAssetFilter !== "all") filteredParts = filteredParts.filter(p => p.asset_id === s.partsAssetFilter);
+
     main = `
-      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px; gap:12px; flex-wrap:wrap;">
         <div style="font-weight:700; font-size:22px;">Parts</div>
         ${!s.showAddPart ? `<button class="btn btn-dark" onclick="window.__toggleAddPart(true)">+ Add part</button>` : ""}
       </div>
       ${s.showAddPart ? addPartFormHtml(s.assets) : ""}
       ${reorderParts.length > 0 ? `<div class="err" style="background:#E3A73B18; border-color:#E3A73B55; color:#8C5E12;">${reorderParts.length} part${reorderParts.length > 1 ? "s are" : " is"} at or below buffer stock and may need reordering.</div>` : ""}
-      <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
-        ${s.parts.map(p => partHtml(p, s.assets)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts added yet.</div>`}
+      <div style="margin-bottom:14px; max-width:280px;">
+        <label class="label">Filter by asset</label>
+        <select onchange="window.__setPartsAssetFilter(this.value)">
+          <option value="all" ${s.partsAssetFilter === "all" ? "selected" : ""}>All parts</option>
+          <option value="general" ${s.partsAssetFilter === "general" ? "selected" : ""}>General stock only</option>
+          ${s.assets.map(a => `<option value="${esc(a.id)}" ${s.partsAssetFilter === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div style="display:flex; flex-direction:column;">
+        ${filteredParts.map(p => partHtml(p, s.assets, s.expandedPart === p.id)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts match this filter.</div>`}
       </div>
     `;
   } else if (s.tab === "history") {
@@ -1194,6 +1219,8 @@ window.__uploadPartPhoto = (partId) => {
   input.value = "";
 };
 window.__deletePart = (id) => deletePart(id);
+window.__toggleExpandPart = (id) => { state.expandedPart = state.expandedPart === id ? null : id; render(); };
+window.__setPartsAssetFilter = (val) => { state.partsAssetFilter = val; render(); };
 window.__toggleLogPart = (orderId) => { state.logPartFor = orderId; render(); };
 window.__confirmLogPart = (orderId) => {
   const partId = document.getElementById(`lp-part-${orderId}`).value;
