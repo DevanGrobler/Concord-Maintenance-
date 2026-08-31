@@ -101,6 +101,13 @@ function inspectionStatus(a) {
   if (days <= 7) return { label: "Due soon", color: "#E3A73B", deep: "#8C5E12", overdue: false, dueDate };
   return { label: "On schedule", color: "#3F8354", deep: "#204F30", overdue: false, dueDate };
 }
+function computeAssetStatus(asset, orders) {
+  if (asset.status) return asset.status; // manual override in place
+  const open = orders.filter(o => o.asset_id === asset.id && o.status !== "done");
+  if (open.some(o => o.priority === "critical")) return "down";
+  if (open.length > 0) return "attention";
+  return "operational";
+}
 
 async function loadTeam() {
   const { data, error } = await supabase.from("team_members").select("*").order("username");
@@ -221,6 +228,13 @@ async function changePin(newPin) {
 }
 async function deleteAsset(id) {
   const { error } = await supabase.from("assets").delete().eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
+}
+
+async function setAssetStatusOverride(id, value) {
+  const { error } = await supabase.from("assets").update({ status: value || null }).eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadData();
   render();
@@ -853,8 +867,10 @@ function addAssetFormHtml() {
   </div>`;
 }
 
-function assetHtml(asset, openCount, canManageAssets) {
-  const st = ASSET_STATUS[asset.status];
+function assetHtml(asset, openCount, canManageAssets, orders) {
+  const effectiveStatus = computeAssetStatus(asset, orders);
+  const st = ASSET_STATUS[effectiveStatus];
+  const isOverridden = !!asset.status;
   return `
   <div class="card" style="position:relative; overflow:visible;">
     <div class="row" style="gap:10px; align-items:flex-start;">
@@ -874,8 +890,19 @@ function assetHtml(asset, openCount, canManageAssets) {
       ${tagHtml(st.label, st.color, st.deep)}
       <div style="font-size:11px; color:#8A9AA8;">${openCount > 0 ? `${openCount} open order${openCount > 1 ? "s" : ""}` : "No open orders"}</div>
     </div>
+    <div style="font-size:11px; color:#8A9AA8; margin-top:4px;">${isOverridden ? "Manually set" : "Automatic, based on open work orders"}</div>
     <div style="font-size:11px; color:#8A9AA8; margin-top:6px;">Last serviced ${esc(asset.last_serviced || "—")}</div>
-    ${canManageAssets ? `<button class="btn" style="margin-top:10px; color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteAsset('${esc(asset.id)}')">Delete asset</button>` : ""}
+    ${canManageAssets ? `
+    <div style="margin-top:10px;">
+      <label class="label">Status</label>
+      <select onchange="window.__setStatusOverride('${esc(asset.id)}', this.value)">
+        <option value="" ${!asset.status ? "selected" : ""}>Automatic (based on work orders)</option>
+        <option value="operational" ${asset.status === "operational" ? "selected" : ""}>Operational</option>
+        <option value="attention" ${asset.status === "attention" ? "selected" : ""}>Needs attention</option>
+        <option value="down" ${asset.status === "down" ? "selected" : ""}>Down</option>
+      </select>
+    </div>
+    <button class="btn" style="margin-top:10px; color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteAsset('${esc(asset.id)}')">Delete asset</button>` : ""}
   </div>`;
 }
 
@@ -1095,7 +1122,7 @@ function renderApp() {
   const s = state;
   const openOrders = s.orders.filter(o => o.status !== "done");
   const overdueOrders = openOrders.filter(o => daysUntil(o.due_date) < 0);
-  const attentionAssets = s.assets.filter(a => a.status !== "operational");
+  const attentionAssets = s.assets.filter(a => computeAssetStatus(a, s.orders) !== "operational");
   const doneOrders = s.orders.filter(o => o.status === "done");
   const reorderParts = s.parts.filter(p => p.stock_on_hand <= p.buffer_stock);
   const overdueInspections = s.assets.filter(a => inspectionStatus(a).overdue);
@@ -1152,7 +1179,7 @@ function renderApp() {
       </div>
       ${s.showAddAsset ? addAssetFormHtml() : ""}
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
-        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length, canManageAssets)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets added yet.</div>`}
+        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length, canManageAssets, s.orders)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets added yet.</div>`}
       </div>
     `;
   } else if (s.tab === "parts") {
@@ -1337,6 +1364,7 @@ window.__submitAddAsset = () => {
   addAsset(name, category, location);
 };
 window.__deleteAsset = (id) => deleteAsset(id);
+window.__setStatusOverride = (id, value) => setAssetStatusOverride(id, value);
 window.__submitAddPart = () => {
   const name = document.getElementById("ap-name").value.trim();
   const category = document.getElementById("ap-category").value.trim();
