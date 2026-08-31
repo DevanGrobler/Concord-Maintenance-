@@ -134,9 +134,12 @@ async function loadData() {
 
 async function init() {
   // This app doesn't use Supabase Auth (it uses the team_members table instead).
-  // Clear out any old auth session that might be lingering from an earlier version of this app,
-  // so it never interferes with API calls or causes stale-token errors.
-  try { await supabase.auth.signOut(); } catch (e) { /* nothing to clear */ }
+  // If an old session from an earlier version of this app is lingering in local storage,
+  // clear it in the background - but never make the app wait on this network call.
+  const hasStaleAuthKey = Object.keys(localStorage).some(k => k.startsWith("sb-") && k.includes("auth-token"));
+  if (hasStaleAuthKey) {
+    supabase.auth.signOut().catch(() => { /* best effort, ignore failures */ });
+  }
 
   await loadTeam();
   const savedId = localStorage.getItem("depot-user-id");
