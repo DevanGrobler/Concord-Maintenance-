@@ -66,7 +66,6 @@ let state = {
   orders: [],
   parts: [],
   inspections: [],
-  breakdowns: [],
   tab: "dashboard",
   filter: "all",
   query: "",
@@ -84,7 +83,6 @@ let state = {
   partsAssetFilter: "all",
   expandedPart: null,
   showChangePin: false,
-  showLogBreakdown: false,
   historyAssetFilter: "all",
   err: "",
 };
@@ -119,23 +117,20 @@ async function loadTeam() {
 }
 
 async function loadData() {
-  const [a, o, p, ins, bd] = await Promise.all([
+  const [a, o, p, ins] = await Promise.all([
     supabase.from("assets").select("*").order("id"),
     supabase.from("work_orders").select("*").order("created_at", { ascending: false }),
     supabase.from("parts").select("*").order("name"),
     supabase.from("inspections").select("*").order("inspected_at", { ascending: false }),
-    supabase.from("breakdowns").select("*").order("occurred_at", { ascending: false }),
   ]);
   if (a.error) state.err = a.error.message;
   if (o.error) state.err = o.error.message;
   if (p.error) state.err = p.error.message;
   if (ins.error) state.err = ins.error.message;
-  if (bd.error) state.err = bd.error.message;
   state.assets = a.data || [];
   state.orders = o.data || [];
   state.parts = p.data || [];
   state.inspections = ins.data || [];
-  state.breakdowns = bd.data || [];
 }
 
 async function init() {
@@ -170,7 +165,6 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "work_orders" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "parts" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "inspections" }, async () => { await loadData(); render(); })
-    .on("postgres_changes", { event: "*", schema: "public", table: "breakdowns" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, async () => { await loadTeam(); render(); })
     .subscribe();
 }
@@ -250,31 +244,6 @@ async function deleteAsset(id) {
 
 async function setAssetStatusOverride(id, value) {
   const { error } = await supabase.from("assets").update({ status: value || null }).eq("id", id);
-  if (error) { state.err = error.message; render(); return; }
-  await loadData();
-  render();
-}
-
-async function logBreakdown(assetId, description, occurredAt) {
-  state.err = "";
-  if (!assetId || !description.trim()) { state.err = "Pick an asset and describe what happened."; render(); return; }
-  const { error } = await supabase.from("breakdowns").insert({
-    id: uid("BD"), asset_id: assetId, reported_by: state.currentUser.username,
-    occurred_at: occurredAt || new Date().toISOString(), description: description.trim(),
-  });
-  if (error) { state.err = error.message; render(); return; }
-  state.showLogBreakdown = false;
-  await loadData();
-  render();
-}
-async function resolveBreakdown(id) {
-  const { error } = await supabase.from("breakdowns").update({ resolved_at: new Date().toISOString() }).eq("id", id);
-  if (error) { state.err = error.message; render(); return; }
-  await loadData();
-  render();
-}
-async function deleteBreakdown(id) {
-  const { error } = await supabase.from("breakdowns").delete().eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadData();
   render();
@@ -553,72 +522,6 @@ function workOrdersPerMachineHtml(orders, assets) {
         <span style="font-size:13px;">${esc(r.asset.name)}</span>
         <span style="font-size:13px;"><strong style="font-weight:600;">${r.count}</strong> total${r.open > 0 ? ` &middot; <span style="color:#C1443C;">${r.open} open</span>` : ""}</span>
       </div>`).join("")}
-  </div>`;
-}
-
-function breakdownSummaryHtml(breakdowns, assets) {
-  const counts = {};
-  breakdowns.forEach(bd => { counts[bd.asset_id] = (counts[bd.asset_id] || 0) + 1; });
-  const ranked = Object.entries(counts)
-    .map(([assetId, count]) => ({ asset: assets.find(a => a.id === assetId), count }))
-    .filter(r => r.asset)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 5);
-  if (ranked.length === 0) return `<div style="font-size:13px; color:#8A9AA8; margin-bottom:16px;">No breakdowns logged yet.</div>`;
-  return `
-  <div class="card" style="margin-bottom:16px;">
-    <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Problem machines</div>
-    ${ranked.map(r => `
-      <div class="row" style="justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #D8D5C9;">
-        <span style="font-size:13px;">${esc(r.asset.name)}</span>
-        <span style="font-size:13px; font-weight:600; color:${r.count >= 3 ? "#C1443C" : "#4C6478"};">${r.count} breakdown${r.count > 1 ? "s" : ""}</span>
-      </div>`).join("")}
-  </div>`;
-}
-
-function logBreakdownFormHtml(assets) {
-  return `
-  <div class="card" style="margin-bottom:16px;">
-    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Log a breakdown</div>
-    <div style="margin-bottom:10px;">
-      <label class="label">Asset</label>
-      <select id="bd-asset">${assets.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}</select>
-    </div>
-    <div style="margin-bottom:10px;">
-      <label class="label">When did it happen</label>
-      <input type="datetime-local" id="bd-occurred" value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}" />
-    </div>
-    <div style="margin-bottom:14px;">
-      <label class="label">What happened</label>
-      <textarea id="bd-description" style="min-height:60px;" placeholder="e.g. Hydraulic hose burst, unit stopped mid-shift"></textarea>
-    </div>
-    <div class="row" style="gap:8px;">
-      <button class="btn btn-dark" onclick="window.__submitBreakdown()">Log breakdown</button>
-      <button class="btn" onclick="window.__toggleLogBreakdown(false)">Cancel</button>
-    </div>
-  </div>`;
-}
-
-function breakdownRowHtml(bd, asset, canManage) {
-  const resolved = !!bd.resolved_at;
-  return `
-  <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:hidden; margin-bottom:8px;">
-    <div style="width:6px; background:${resolved ? "#3F8354" : "#C1443C"}; flex-shrink:0;"></div>
-    <div style="flex:1; padding:10px 14px; min-width:0;">
-      <div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
-        <div>
-          <div style="font-weight:600; font-size:14px;">${asset ? esc(asset.name) : "Unknown asset"}</div>
-          <div style="font-size:12px; color:#8A9AA8;">${esc(fmt(bd.occurred_at))} &middot; reported by ${esc(bd.reported_by)}</div>
-        </div>
-        ${resolved ? tagHtml("Resolved", "#3F8354", "#204F30") : tagHtml("Ongoing", "#C1443C", "#7A241F")}
-      </div>
-      ${bd.description ? `<div style="font-size:13px; margin-top:6px;">${esc(bd.description)}</div>` : ""}
-      ${canManage ? `
-      <div class="row" style="gap:6px; margin-top:8px;">
-        ${!resolved ? `<button class="btn" onclick="window.__resolveBreakdown('${bd.id}')">Mark resolved</button>` : ""}
-        <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteBreakdown('${bd.id}')">Delete</button>
-      </div>` : ""}
-    </div>
   </div>`;
 }
 
@@ -1339,18 +1242,7 @@ function renderApp() {
     `;
   } else if (s.tab === "history") {
     const selectedCount = Object.values(s.selectedHistory).filter(Boolean).length;
-    const canManageBreakdowns = can(s.currentUser, "can_manage_assets");
     main = `
-      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
-        <div style="font-weight:700; font-size:22px;">Machine breakdowns</div>
-        ${!s.showLogBreakdown ? `<button class="btn btn-dark" onclick="window.__toggleLogBreakdown(true)">+ Log breakdown</button>` : ""}
-      </div>
-      ${s.showLogBreakdown ? logBreakdownFormHtml(s.assets) : ""}
-      ${breakdownSummaryHtml(s.breakdowns, s.assets)}
-      <div style="margin-bottom:24px;">
-        ${[...s.breakdowns].sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at)).slice(0, 10).map(bd => breakdownRowHtml(bd, s.assets.find(a => a.id === bd.asset_id), canManageBreakdowns)).join("")}
-      </div>
-
       <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px; gap:12px; flex-wrap:wrap;">
         <div style="font-weight:700; font-size:22px;">Work order history</div>
         <button class="btn btn-dark" onclick="window.__exportHistory()">Export to Excel${selectedCount > 0 ? ` (${selectedCount} selected)` : " (all)"}</button>
@@ -1514,17 +1406,7 @@ window.__submitAddAsset = () => {
 };
 window.__deleteAsset = (id) => deleteAsset(id);
 window.__setStatusOverride = (id, value) => setAssetStatusOverride(id, value);
-window.__toggleLogBreakdown = (v) => { state.showLogBreakdown = v; state.err = ""; render(); };
 window.__setHistoryAssetFilter = (val) => { state.historyAssetFilter = val; render(); };
-window.__submitBreakdown = () => {
-  const assetId = document.getElementById("bd-asset").value;
-  const occurredLocal = document.getElementById("bd-occurred").value;
-  const description = document.getElementById("bd-description").value;
-  const occurredAt = occurredLocal ? new Date(occurredLocal).toISOString() : null;
-  logBreakdown(assetId, description, occurredAt);
-};
-window.__resolveBreakdown = (id) => resolveBreakdown(id);
-window.__deleteBreakdown = (id) => deleteBreakdown(id);
 window.__submitAddPart = () => {
   const name = document.getElementById("ap-name").value.trim();
   const category = document.getElementById("ap-category").value.trim();
