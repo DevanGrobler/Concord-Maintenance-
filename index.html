@@ -71,6 +71,7 @@ let state = {
   query: "",
   showForm: false,
   showAddMember: false,
+  showAddAsset: false,
   showAddPart: false,
   logPartFor: null,
   expandedOrder: null,
@@ -311,6 +312,17 @@ async function savePart(id, stock, buffer, supplierName, supplierContact, suppli
 async function deletePart(id) {
   const { error } = await supabase.from("parts").delete().eq("id", id);
   if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
+}
+
+async function addAsset(name, category, location) {
+  state.err = "";
+  const { error } = await supabase.from("assets").insert({
+    id: uid("AS"), name, category, location, status: "operational",
+  });
+  if (error) { state.err = error.message; render(); return; }
+  state.showAddAsset = false;
   await loadData();
   render();
 }
@@ -768,6 +780,31 @@ function ticketHtml(wo, asset, parts, logPartFor, expandedOrder) {
   </div>`;
 }
 
+function addAssetFormHtml() {
+  return `
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Add asset</div>
+    <div style="margin-bottom:10px;">
+      <label class="label">Asset name</label>
+      <input id="aa-name" placeholder="e.g. Rooftop chiller 2" />
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;">
+      <div>
+        <label class="label">Category</label>
+        <input id="aa-category" placeholder="e.g. HVAC" />
+      </div>
+      <div>
+        <label class="label">Location</label>
+        <input id="aa-location" placeholder="e.g. Roof - South" />
+      </div>
+    </div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-dark" onclick="window.__submitAddAsset()">Add asset</button>
+      <button class="btn" onclick="window.__toggleAddAsset(false)">Cancel</button>
+    </div>
+  </div>`;
+}
+
 function assetHtml(asset, openCount) {
   const st = ASSET_STATUS[asset.status];
   return `
@@ -1040,9 +1077,13 @@ function renderApp() {
     `;
   } else if (s.tab === "assets") {
     main = `
-      <div style="font-weight:700; font-size:22px; margin-bottom:16px;">Assets</div>
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div style="font-weight:700; font-size:22px;">Assets</div>
+        ${!s.showAddAsset ? `<button class="btn btn-dark" onclick="window.__toggleAddAsset(true)">+ Add asset</button>` : ""}
+      </div>
+      ${s.showAddAsset ? addAssetFormHtml() : ""}
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;">
-        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length)).join("")}
+        ${s.assets.map(a => assetHtml(a, s.orders.filter(o => o.asset_id === a.id && o.status !== "done").length)).join("") || `<div style="color:#8A9AA8; font-size:13px;">No assets added yet.</div>`}
       </div>
     `;
   } else if (s.tab === "parts") {
@@ -1189,6 +1230,14 @@ window.__submitAddMember = () => {
 };
 window.__removeMember = (id) => removeMember(id);
 window.__toggleAddPart = (v) => { state.showAddPart = v; state.err = ""; render(); };
+window.__toggleAddAsset = (v) => { state.showAddAsset = v; state.err = ""; render(); };
+window.__submitAddAsset = () => {
+  const name = document.getElementById("aa-name").value.trim();
+  const category = document.getElementById("aa-category").value.trim();
+  const location = document.getElementById("aa-location").value.trim();
+  if (!name) { state.err = "Enter an asset name."; render(); return; }
+  addAsset(name, category, location);
+};
 window.__submitAddPart = () => {
   const name = document.getElementById("ap-name").value.trim();
   const category = document.getElementById("ap-category").value.trim();
