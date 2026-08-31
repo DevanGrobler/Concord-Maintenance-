@@ -1336,6 +1336,7 @@ window.__submitAddAsset = () => {
   if (!name) { state.err = "Enter an asset name."; render(); return; }
   addAsset(name, category, location);
 };
+window.__deleteAsset = (id) => deleteAsset(id);
 window.__submitAddPart = () => {
   const name = document.getElementById("ap-name").value.trim();
   const category = document.getElementById("ap-category").value.trim();
