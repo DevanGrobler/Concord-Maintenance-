@@ -446,10 +446,10 @@ async function submitInspection(assetId, result, notes, files, checkpointsChecke
   render();
 }
 
-async function addCheckpoint(label) {
+async function addCheckpoint(label, assetId) {
   state.err = "";
   if (!label.trim()) return;
-  const { error } = await supabase.from("inspection_checkpoints").insert({ id: uid("CKP"), label: label.trim() });
+  const { error } = await supabase.from("inspection_checkpoints").insert({ id: uid("CKP"), label: label.trim(), asset_id: assetId || null });
   if (error) { state.err = error.message; render(); return; }
   await loadData();
   render();
@@ -671,19 +671,33 @@ function jobCardHtml(wo, asset, parts) {
   </div>`;
 }
 
-function manageCheckpointsHtml(checkpoints) {
+function manageCheckpointsHtml(checkpoints, assets) {
   return `
   <div class="card" style="margin-bottom:16px;">
     <div style="font-weight:600; font-size:15px; margin-bottom:10px;">Manage inspection checklist</div>
-    <div style="font-size:11px; color:#8A9AA8; margin-bottom:12px;">These checkpoints appear on every "Log inspection" form. Admin only.</div>
-    ${checkpoints.length === 0 ? `<div style="font-size:13px; color:#8A9AA8; margin-bottom:10px;">No checkpoints yet.</div>` : checkpoints.map(cp => `
+    <div style="font-size:11px; color:#8A9AA8; margin-bottom:12px;">A checkpoint allocated to a specific machine only appears when inspecting that machine. Leave it general to apply everywhere. Admin only.</div>
+    ${checkpoints.length === 0 ? `<div style="font-size:13px; color:#8A9AA8; margin-bottom:10px;">No checkpoints yet.</div>` : checkpoints.map(cp => {
+      const asset = assets.find(a => a.id === cp.asset_id);
+      return `
       <div class="row" style="justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #D8D5C9;">
-        <span style="font-size:13px;">${esc(cp.label)}</span>
+        <div>
+          <span style="font-size:13px;">${esc(cp.label)}</span>
+          <span style="font-size:11px; color:#8A9AA8; margin-left:8px;">${asset ? esc(asset.name) : "All machines"}</span>
+        </div>
         <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteCheckpoint('${esc(cp.id)}')">Remove</button>
-      </div>`).join("")}
-    <div class="row" style="gap:8px; margin-top:12px;">
-      <input id="ckp-new-label" placeholder="e.g. Check hydraulic fluid level" style="flex:1;" />
-      <button class="btn btn-dark" onclick="window.__submitCheckpoint()">Add</button>
+      </div>`;
+    }).join("")}
+    <div style="margin-top:12px;">
+      <label class="label">Checkpoint</label>
+      <input id="ckp-new-label" placeholder="e.g. Check hydraulic fluid level" style="margin-bottom:8px;" />
+      <label class="label">Applies to</label>
+      <div class="row" style="gap:8px;">
+        <select id="ckp-new-asset" style="flex:1;">
+          <option value="">All machines (general)</option>
+          ${assets.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
+        </select>
+        <button class="btn btn-dark" onclick="window.__submitCheckpoint()">Add</button>
+      </div>
     </div>
   </div>`;
 }
@@ -715,14 +729,17 @@ function inspectionHtml(a, inspectionsForAsset, isLogging, isHistoryOpen, checkp
 
     ${isLogging ? `
     <div style="margin-top:12px; padding:10px; background:#EEEDE6; border-radius:4px;">
-      ${checkpoints.length > 0 ? `
-      <label class="label">Checklist</label>
-      <div style="margin-bottom:10px;">
-        ${checkpoints.map(cp => `
-          <label style="display:flex; align-items:center; gap:6px; font-size:13px; margin-bottom:4px;">
-            <input type="checkbox" id="ckpt-${esc(a.id)}-${esc(cp.id)}" style="width:auto;" /> ${esc(cp.label)}
-          </label>`).join("")}
-      </div>` : ""}
+      ${(() => {
+        const relevant = checkpoints.filter(cp => !cp.asset_id || cp.asset_id === a.id);
+        return relevant.length > 0 ? `
+        <label class="label">Checklist</label>
+        <div style="margin-bottom:10px;">
+          ${relevant.map(cp => `
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px; margin-bottom:4px;">
+              <input type="checkbox" id="ckpt-${esc(a.id)}-${esc(cp.id)}" style="width:auto;" /> ${esc(cp.label)}
+            </label>`).join("")}
+        </div>` : "";
+      })()}
       <label class="label">Result</label>
       <select id="ins-result-${esc(a.id)}" style="margin-bottom:8px;">
         <option value="pass">Pass</option>
@@ -1352,7 +1369,7 @@ function renderApp() {
       </div>
 
       <div style="font-weight:600; font-size:15px; margin-bottom:10px; color:#4C6478; text-transform:uppercase; letter-spacing:0.4px;">Inspection checklist</div>
-      ${manageCheckpointsHtml(s.checkpoints)}
+      ${manageCheckpointsHtml(s.checkpoints, s.assets)}
     `;
   }
 
@@ -1529,7 +1546,8 @@ window.__submitInspection = (assetId) => {
   const notes = document.getElementById(`ins-notes-${assetId}`).value.trim();
   const fileInput = document.getElementById(`ins-photos-${assetId}`);
   const files = fileInput.files ? Array.from(fileInput.files) : [];
-  const checkpointsChecked = state.checkpoints.map(cp => {
+  const relevant = state.checkpoints.filter(cp => !cp.asset_id || cp.asset_id === assetId);
+  const checkpointsChecked = relevant.map(cp => {
     const box = document.getElementById(`ckpt-${assetId}-${cp.id}`);
     return { id: cp.id, label: cp.label, checked: box ? box.checked : false };
   });
@@ -1537,7 +1555,8 @@ window.__submitInspection = (assetId) => {
 };
 window.__submitCheckpoint = () => {
   const input = document.getElementById("ckp-new-label");
-  addCheckpoint(input.value);
+  const assetSelect = document.getElementById("ckp-new-asset");
+  addCheckpoint(input.value, assetSelect.value);
 };
 window.__deleteCheckpoint = (id) => deleteCheckpoint(id);
 window.__exportHistory = () => exportHistoryXlsx();
