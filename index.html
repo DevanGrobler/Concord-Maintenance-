@@ -595,6 +595,50 @@ async function exportPartsXlsx() {
   URL.revokeObjectURL(url);
 }
 
+async function exportReordersXlsx() {
+  const rows = state.parts.filter(p => p.stock_on_hand <= p.buffer_stock);
+
+  if (!window.ExcelJS) {
+    state.err = "The Excel export library didn't load. Check your internet connection, refresh the page, and try again.";
+    render();
+    return;
+  }
+  const ExcelJS = window.ExcelJS;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Reorders");
+  ws.columns = [
+    { header: "ID", key: "id", width: 12 },
+    { header: "Name", key: "name", width: 28 },
+    { header: "Category", key: "category", width: 16 },
+    { header: "Unit", key: "unit", width: 10 },
+    { header: "On hand", key: "stock", width: 12 },
+    { header: "Buffer stock", key: "buffer", width: 14 },
+    { header: "Order qty", key: "needed", width: 12 },
+    { header: "Allocated asset", key: "asset", width: 22 },
+    { header: "Supplier", key: "supplier", width: 20 },
+    { header: "Supplier contact", key: "supplierContact", width: 20 },
+    { header: "Supplier SKU", key: "supplierSku", width: 18 },
+  ];
+  rows.forEach(p => {
+    const asset = state.assets.find(a => a.id === p.asset_id);
+    const needed = Math.max(p.buffer_stock - p.stock_on_hand, 1);
+    ws.addRow({
+      id: p.id, name: p.name, category: p.category || "", unit: p.unit,
+      stock: p.stock_on_hand, buffer: p.buffer_stock, needed,
+      asset: asset ? asset.name : "General stock",
+      supplier: p.supplier_name || "", supplierContact: p.supplier_contact || "", supplierSku: p.supplier_sku || "",
+    });
+  });
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `flex-reorders-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function workOrdersPerMachineHtml(orders, assets) {
   const counts = {};
   orders.forEach(wo => { if (wo.asset_id) counts[wo.asset_id] = (counts[wo.asset_id] || 0) + 1; });
@@ -1433,7 +1477,10 @@ function renderApp() {
   } else if (s.tab === "reorders") {
     const canManageReorders = can(s.currentUser, "can_manage_parts");
     main = `
-      <div style="font-weight:700; font-size:22px; margin-bottom:16px;">Reorders</div>
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px; gap:12px; flex-wrap:wrap;">
+        <div style="font-weight:700; font-size:22px;">Reorders</div>
+        ${reorderParts.length > 0 ? `<button class="btn btn-dark" onclick="window.__exportReorders()">Export to Excel</button>` : ""}
+      </div>
       <div style="font-size:12px; color:#8A9AA8; margin-bottom:16px;">Live list of parts at or below buffer stock, with the quantity needed to get back to buffer (buffer stock minus what's on hand).</div>
       ${reorderParts.length === 0 ? `<div style="font-size:13px; color:#8A9AA8;">Nothing needs reordering right now.</div>` : reorderParts.map(p => reorderNeededRowHtml(p, canManageReorders)).join("")}
     `;
@@ -1647,6 +1694,7 @@ window.__setPartsSearch = (val) => { state.partsSearch = val; render(); };
 window.__setAssetsSearch = (val) => { state.assetsSearch = val; render(); };
 window.__togglePartSelect = (id, checked) => { state.selectedParts[id] = checked; render(); };
 window.__exportParts = () => exportPartsXlsx();
+window.__exportReorders = () => exportReordersXlsx();
 window.__receiveStock = (partId) => {
   const quantity = parseInt(document.getElementById(`rc-qty-${partId}`).value, 10);
   receiveStock(partId, quantity);
