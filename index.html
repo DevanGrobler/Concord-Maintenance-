@@ -68,6 +68,7 @@ let state = {
   inspections: [],
   checkpoints: [],
   checkpointAssetMap: {},
+  partOrders: [],
   tab: "dashboard",
   filter: "all",
   query: "",
@@ -86,6 +87,7 @@ let state = {
   partsSearch: "",
   assetsSearch: "",
   selectedParts: {},
+  showLogReorder: false,
   expandedPart: null,
   showChangePin: false,
   historyAssetFilter: "all",
@@ -122,13 +124,14 @@ async function loadTeam() {
 }
 
 async function loadData() {
-  const [a, o, p, ins, cp, cpa] = await Promise.all([
+  const [a, o, p, ins, cp, cpa, po] = await Promise.all([
     supabase.from("assets").select("*").order("id"),
     supabase.from("work_orders").select("*").order("created_at", { ascending: false }),
     supabase.from("parts").select("*").order("name"),
     supabase.from("inspections").select("*").order("inspected_at", { ascending: false }),
     supabase.from("inspection_checkpoints").select("*").order("created_at"),
     supabase.from("checkpoint_assets").select("*"),
+    supabase.from("part_orders").select("*").order("ordered_at", { ascending: false }),
   ]);
   if (a.error) state.err = a.error.message;
   if (o.error) state.err = o.error.message;
@@ -136,11 +139,13 @@ async function loadData() {
   if (ins.error) state.err = ins.error.message;
   if (cp.error) state.err = cp.error.message;
   if (cpa.error) state.err = cpa.error.message;
+  if (po.error) state.err = po.error.message;
   state.assets = a.data || [];
   state.orders = o.data || [];
   state.parts = p.data || [];
   state.inspections = ins.data || [];
   state.checkpoints = cp.data || [];
+  state.partOrders = po.data || [];
   const map = {};
   (cpa.data || []).forEach(row => {
     if (!map[row.checkpoint_id]) map[row.checkpoint_id] = [];
@@ -183,6 +188,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "inspections" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "inspection_checkpoints" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "checkpoint_assets" }, async () => { await loadData(); render(); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "part_orders" }, async () => { await loadData(); render(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, async () => { await loadTeam(); render(); })
     .subscribe();
 }
@@ -380,6 +386,42 @@ async function savePart(id, stock, buffer, supplierName, supplierContact, suppli
 }
 async function deletePart(id) {
   const { error } = await supabase.from("parts").delete().eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
+}
+
+async function logReorder(partId, quantity, notes) {
+  state.err = "";
+  if (!partId || !quantity || quantity <= 0) { state.err = "Pick a part and a quantity greater than 0."; render(); return; }
+  const { error } = await supabase.from("part_orders").insert({
+    id: uid("PO"), part_id: partId, quantity, ordered_by: state.currentUser.username, notes: notes || null,
+  });
+  if (error) { state.err = error.message; render(); return; }
+  state.showLogReorder = false;
+  await loadData();
+  render();
+}
+async function receiveReorder(id) {
+  const order = state.partOrders.find(o => o.id === id);
+  if (!order) return;
+  const part = state.parts.find(p => p.id === order.part_id);
+  if (!part) return;
+  const { error: partErr } = await supabase.from("parts").update({ stock_on_hand: part.stock_on_hand + order.quantity }).eq("id", part.id);
+  if (partErr) { state.err = partErr.message; render(); return; }
+  const { error: orderErr } = await supabase.from("part_orders").update({ status: "received", received_at: new Date().toISOString() }).eq("id", id);
+  if (orderErr) { state.err = orderErr.message; render(); return; }
+  await loadData();
+  render();
+}
+async function cancelReorder(id) {
+  const { error } = await supabase.from("part_orders").update({ status: "cancelled" }).eq("id", id);
+  if (error) { state.err = error.message; render(); return; }
+  await loadData();
+  render();
+}
+async function deleteReorder(id) {
+  const { error } = await supabase.from("part_orders").delete().eq("id", id);
   if (error) { state.err = error.message; render(); return; }
   await loadData();
   render();
@@ -1231,6 +1273,58 @@ function partHtml(p, assets, isExpanded, canManageParts, isSelected) {
   </div>`;
 }
 
+function logReorderFormHtml(parts) {
+  return `
+  <div class="card" style="margin-bottom:16px;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">Log a reorder</div>
+    <div style="margin-bottom:10px;">
+      <label class="label">Part</label>
+      <select id="ro-part">${parts.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.stock_on_hand} on hand)</option>`).join("")}</select>
+    </div>
+    <div style="margin-bottom:10px;">
+      <label class="label">Quantity ordered</label>
+      <input type="number" min="1" id="ro-quantity" value="1" />
+    </div>
+    <div style="margin-bottom:14px;">
+      <label class="label">Notes</label>
+      <input id="ro-notes" placeholder="e.g. PO number, supplier reference" />
+    </div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-dark" onclick="window.__submitReorder()">Log reorder</button>
+      <button class="btn" onclick="window.__toggleLogReorder(false)">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function reorderRowHtml(order, part, canManage) {
+  const statusTag = order.status === "received" ? tagHtml("Received", "#3F8354", "#204F30")
+    : order.status === "cancelled" ? tagHtml("Cancelled", "#8A9AA8", "#4C6478")
+    : tagHtml("Ordered", "#E3A73B", "#8C5E12");
+  return `
+  <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:hidden; margin-bottom:8px;">
+    <div style="width:6px; background:${order.status === "received" ? "#3F8354" : order.status === "cancelled" ? "#8A9AA8" : "#E3A73B"}; flex-shrink:0;"></div>
+    <div style="flex:1; padding:10px 14px; min-width:0;">
+      <div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:600; font-size:14px;">${part ? esc(part.name) : "Unknown part"} &middot; qty ${order.quantity}</div>
+          <div style="font-size:12px; color:#8A9AA8;">Ordered ${esc(fmt(order.ordered_at))} by ${esc(order.ordered_by)}${order.received_at ? ` &middot; received ${esc(fmt(order.received_at))}` : ""}</div>
+        </div>
+        ${statusTag}
+      </div>
+      ${order.notes ? `<div style="font-size:13px; margin-top:6px;">${esc(order.notes)}</div>` : ""}
+      ${canManage && order.status === "ordered" ? `
+      <div class="row" style="gap:6px; margin-top:8px;">
+        <button class="btn" onclick="window.__receiveReorder('${order.id}')">Mark received</button>
+        <button class="btn" onclick="window.__cancelReorder('${order.id}')">Cancel</button>
+      </div>` : ""}
+      ${canManage && order.status !== "ordered" ? `
+      <div class="row" style="gap:6px; margin-top:8px;">
+        <button class="btn" style="color:#C1443C; border-color:#C1443C55;" onclick="window.__deleteReorder('${order.id}')">Delete record</button>
+      </div>` : ""}
+    </div>
+  </div>`;
+}
+
 function addPartFormHtml(assets) {
   return `
   <div class="card" style="margin-bottom:16px;">
@@ -1396,6 +1490,21 @@ function renderApp() {
         ${filteredParts.map(p => partHtml(p, s.assets, s.expandedPart === p.id, canManageParts, !!s.selectedParts[p.id])).join("") || `<div style="color:#8A9AA8; font-size:13px;">No parts match.</div>`}
       </div>
     `;
+  } else if (s.tab === "reorders") {
+    const canManageReorders = can(s.currentUser, "can_manage_parts");
+    const ordered = s.partOrders.filter(o => o.status === "ordered");
+    const past = s.partOrders.filter(o => o.status !== "ordered");
+    main = `
+      <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div style="font-weight:700; font-size:22px;">Reorders</div>
+        ${!s.showLogReorder ? `<button class="btn btn-dark" onclick="window.__toggleLogReorder(true)">+ Log reorder</button>` : ""}
+      </div>
+      ${s.showLogReorder ? logReorderFormHtml(s.parts) : ""}
+      <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Currently on order</div>
+      ${ordered.length === 0 ? `<div style="font-size:13px; color:#8A9AA8; margin-bottom:20px;">Nothing on order right now.</div>` : `<div style="margin-bottom:20px;">${ordered.map(o => reorderRowHtml(o, s.parts.find(p => p.id === o.part_id), canManageReorders)).join("")}</div>`}
+      <div style="font-weight:600; font-size:14px; margin-bottom:10px; color:#4C6478; text-transform:uppercase;">Past reorders</div>
+      ${past.length === 0 ? `<div style="font-size:13px; color:#8A9AA8;">No past reorders yet.</div>` : past.map(o => reorderRowHtml(o, s.parts.find(p => p.id === o.part_id), canManageReorders)).join("")}
+    `;
   } else if (s.tab === "history") {
     const selectedCount = Object.values(s.selectedHistory).filter(Boolean).length;
     main = `
@@ -1472,6 +1581,7 @@ function renderApp() {
       ${nav("work-orders", "Work orders")}
       ${nav("assets", "Assets")}
       ${nav("parts", "Parts")}
+      ${nav("reorders", "Reorders")}
       ${nav("inspections", "Inspections")}
       ${nav("history", "History")}
       ${s.currentUser.is_admin ? nav("settings", "Settings") : ""}
@@ -1605,6 +1715,16 @@ window.__setPartsSearch = (val) => { state.partsSearch = val; render(); };
 window.__setAssetsSearch = (val) => { state.assetsSearch = val; render(); };
 window.__togglePartSelect = (id, checked) => { state.selectedParts[id] = checked; render(); };
 window.__exportParts = () => exportPartsXlsx();
+window.__toggleLogReorder = (v) => { state.showLogReorder = v; state.err = ""; render(); };
+window.__submitReorder = () => {
+  const partId = document.getElementById("ro-part").value;
+  const quantity = parseInt(document.getElementById("ro-quantity").value, 10);
+  const notes = document.getElementById("ro-notes").value.trim();
+  logReorder(partId, quantity, notes);
+};
+window.__receiveReorder = (id) => receiveReorder(id);
+window.__cancelReorder = (id) => cancelReorder(id);
+window.__deleteReorder = (id) => deleteReorder(id);
 window.__toggleLogPart = (orderId) => { state.logPartFor = orderId; render(); };
 window.__confirmLogPart = (orderId) => {
   const partId = document.getElementById(`lp-part-${orderId}`).value;
