@@ -1295,13 +1295,19 @@ function partHtml(p, assets, isExpanded, canManageParts, isSelected) {
 function reorderNeededRowHtml(part, canManage) {
   const needed = Math.max(part.buffer_stock - part.stock_on_hand, 1);
   return `
-  <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:hidden; margin-bottom:8px;">
-    <div style="width:6px; background:#C1443C; flex-shrink:0;"></div>
+  <div class="row" style="background:#fff; border:1px solid #D8D5C9; border-radius:4px; overflow:visible; margin-bottom:8px;">
+    <div style="width:6px; background:#C1443C; flex-shrink:0; border-radius:4px 0 0 4px;"></div>
     <div style="flex:1; padding:10px 14px; min-width:0;">
       <div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
-        <div>
-          <div style="font-weight:600; font-size:14px;">${esc(part.name)}${part.part_number ? ` <span style="font-weight:400; color:#8A9AA8; font-size:12px;">(${esc(part.part_number)})</span>` : ""}</div>
-          <div style="font-size:12px; color:#8A9AA8;">${part.stock_on_hand} on hand &middot; buffer ${part.buffer_stock}</div>
+        <div class="row" style="gap:10px; align-items:center;">
+          <input type="file" accept="image/*" id="pp-file-${esc(part.id)}" style="display:none;" onchange="window.__uploadPartPhoto('${esc(part.id)}')" />
+          ${part.photo_url
+            ? `<img src="${esc(part.photo_url)}" class="part-photo" style="width:36px; height:36px;" title="Click to change photo" onclick="document.getElementById('pp-file-${esc(part.id)}').click()" />`
+            : `<div class="part-photo" style="width:36px; height:36px; display:flex; align-items:center; justify-content:center; background:#EEEDE6; color:#8A9AA8; font-size:8px; text-align:center;" onclick="document.getElementById('pp-file-${esc(part.id)}').click()">+ Photo</div>`}
+          <div>
+            <div style="font-weight:600; font-size:14px;">${esc(part.name)}${part.part_number ? ` <span style="font-weight:400; color:#8A9AA8; font-size:12px;">(${esc(part.part_number)})</span>` : ""}</div>
+            <div style="font-size:12px; color:#8A9AA8;">${part.stock_on_hand} on hand &middot; buffer ${part.buffer_stock}</div>
+          </div>
         </div>
         <div style="font-size:13px; font-weight:600; color:#C1443C;">Order ${needed} ${esc(part.unit)}</div>
       </div>
