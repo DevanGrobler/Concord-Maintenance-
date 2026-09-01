@@ -448,7 +448,7 @@ async function submitInspection(assetId, result, notes, files, checkpointsChecke
       asset_id: assetId,
       priority: "high",
       status: "open",
-      assigned_to: "Unassigned",
+      assigned_to: state.currentUser.username,
       created_by: state.currentUser.username,
       due_date: new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
       notes: notes || "Auto-created from a failed inspection.",
